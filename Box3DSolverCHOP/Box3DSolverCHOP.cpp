@@ -1,6 +1,5 @@
 #include "Box3DSolverCHOP.h"
 
-#include <cmath>
 #include <cstring>
 
 using namespace tdb3;
@@ -15,11 +14,14 @@ constexpr char SimulateName[] = "Simulate";
 constexpr char ResetName[] = "Reset";
 constexpr char GravityName[] = "Gravity";
 constexpr char SubstepsName[] = "Substeps";
+constexpr char WorkersName[] = "Workers";
 constexpr char GroundName[] = "Ground";
 constexpr char GroundsizeName[] = "Groundsize";
+constexpr char ContainerName[] = "Container";
+constexpr char WallheightName[] = "Wallheight";
+constexpr char WallthicknessName[] = "Wallthickness";
 constexpr char CollisionsopName[] = "Collisionsop";
-constexpr char BoxcountName[] = "Boxcount";
-constexpr char SpawnheightName[] = "Spawnheight";
+constexpr char ResetoncollisionName[] = "Resetoncollision";
 
 WorldSettings readWorldSettings( const OP_Inputs* inputs )
 {
@@ -33,6 +35,10 @@ WorldSettings readWorldSettings( const OP_Inputs* inputs )
 
 	s.ground = inputs->getParInt( GroundName ) != 0;
 	s.groundSize = (float)inputs->getParDouble( GroundsizeName );
+	s.container = inputs->getParInt( ContainerName ) != 0;
+	s.wallHeight = (float)inputs->getParDouble( WallheightName );
+	s.wallThickness = (float)inputs->getParDouble( WallthicknessName );
+	s.workerCount = inputs->getParInt( WorkersName );
 	s.subSteps = inputs->getParInt( SubstepsName );
 	return s;
 }
@@ -122,27 +128,10 @@ void Box3DSolverCHOP::getGeneralInfo( CHOP_GeneralInfo* ginfo, const OP_Inputs*,
 	ginfo->timeslice = false;
 }
 
-bool Box3DSolverCHOP::getOutputInfo( CHOP_OutputInfo* info, const OP_Inputs* inputs, void* )
+bool Box3DSolverCHOP::getOutputInfo( CHOP_OutputInfo* info, const OP_Inputs*, void* )
 {
-	int sampleCount = inputs->getParInt( BoxcountName );
-
-	const OP_SOPInput* sop = inputs->getParSOP( SpawnsopParName );
-	if ( sop != nullptr )
-	{
-		sampleCount = sop->getNumPoints();
-	}
-	else
-	{
-		SolverCore* core = Registry::find( myOpId );
-		if ( core != nullptr && core->groupCount() > ( core->hasGroup( myOpId ) ? 1 : 0 ) )
-		{
-			// Bodies nodes drive this world; the demo grid is off
-			sampleCount = 0;
-		}
-	}
-
 	info->numChannels = kNumOutputChannels;
-	info->numSamples = sampleCount > 0 ? sampleCount : 1;
+	info->numSamples = 1;
 	info->startIndex = 0;
 	return true;
 }
@@ -152,106 +141,23 @@ void Box3DSolverCHOP::getChannelName( int32_t index, OP_String* name, const OP_I
 	name->setString( kOutputChannelNames[index] );
 }
 
-std::vector<SpawnBody> Box3DSolverCHOP::buildDemoGridDefs( const OP_Inputs* inputs,
-														   const SpawnDefaults& defaults ) const
-{
-	// Deterministic grid above the ground. A tiny index-based jitter breaks up
-	// perfectly aligned stacks; no rand() so Reset always reproduces the same
-	// simulation.
-	int boxCount = inputs->getParInt( BoxcountName );
-	float spawnHeight = (float)inputs->getParDouble( SpawnheightName );
-	float spacing = 1.5f * ( defaults.sizeX > defaults.sizeY ? defaults.sizeX : defaults.sizeY );
-
-	std::vector<SpawnBody> defs;
-	defs.reserve( boxCount );
-	for ( int i = 0; i < boxCount; ++i )
-	{
-		int col = i % 4;
-		int row = ( i / 4 ) % 4;
-		int layer = i / 16;
-
-		float jitter = 0.05f * defaults.sizeX * sinf( 12.9898f * (float)( i + 1 ) );
-
-		SpawnBody d;
-		d.px = ( col - 1.5f ) * spacing + jitter;
-		d.py = spawnHeight + layer * spacing;
-		d.pz = ( row - 1.5f ) * spacing - jitter;
-		d.shape = defaults.shape;
-		d.sizeX = defaults.sizeX;
-		d.sizeY = defaults.sizeY;
-		d.sizeZ = defaults.sizeZ;
-		d.density = defaults.density;
-		d.friction = defaults.friction;
-
-		defs.push_back( d );
-	}
-
-	return defs;
-}
-
 void Box3DSolverCHOP::execute( CHOP_Output* output, const OP_Inputs* inputs, void* )
 {
 	SolverCore* core = Registry::getOrCreate( myOpId );
 
 	core->setWorldSettings( readWorldSettings( inputs ) );
 
-	const OP_SOPInput* spawnSop = inputs->getParSOP( SpawnsopParName );
 	const OP_SOPInput* collisionSop = inputs->getParSOP( CollisionsopName );
-	bool hasSop = spawnSop != nullptr;
 	bool hasCollision = collisionSop != nullptr;
 
-	// The demo grid only runs when this solver is alone: no Spawn SOP and no
-	// Bodies nodes contributing groups.
-	bool hasExternalGroups = core->groupCount() > ( core->hasGroup( myOpId ) ? 1 : 0 );
-	bool demoMode = !hasSop && !hasExternalGroups;
-
-	// The demo-grid parameters only apply in demo mode
-	inputs->enablePar( BoxcountName, demoMode );
-	inputs->enablePar( SpawnheightName, demoMode );
-	inputs->enablePar( ResetoninputParName, hasSop || hasCollision );
-
-	bool resetOnInput = inputs->getParInt( ResetoninputParName ) != 0;
-	SpawnDefaults defaults = readSpawnDefaults( inputs );
-
-	// ---- own spawn group ----
-	uint32_t sopId = hasSop ? spawnSop->opId : 0;
-	int64_t sopCooks = hasSop ? spawnSop->totalCooks : -1;
-	int boxCount = inputs->getParInt( BoxcountName );
-	float spawnHeight = (float)inputs->getParDouble( SpawnheightName );
-
-	bool groupChanged = !myGroupRegistered || defaults != myLastDefaults || demoMode != myLastDemoMode ||
-						sopId != mySopId || ( hasSop && resetOnInput && sopCooks != mySopCooks ) ||
-						( demoMode && ( boxCount != myLastBoxCount || spawnHeight != myLastSpawnHeight ) );
-
-	if ( groupChanged )
-	{
-		if ( hasSop )
-		{
-			core->setGroup( myOpId, parseSpawnSop( spawnSop, defaults ) );
-		}
-		else if ( demoMode )
-		{
-			core->setGroup( myOpId, buildDemoGridDefs( inputs, defaults ) );
-		}
-		else
-		{
-			core->setGroup( myOpId, {} );
-		}
-
-		myGroupRegistered = true;
-		myLastDefaults = defaults;
-		myLastDemoMode = demoMode;
-		mySopId = sopId;
-		mySopCooks = sopCooks;
-		myLastBoxCount = boxCount;
-		myLastSpawnHeight = spawnHeight;
-	}
+	inputs->enablePar( ResetoncollisionName, hasCollision );
+	bool resetOnCollision = inputs->getParInt( ResetoncollisionName ) != 0;
 
 	// ---- collision mesh ----
 	uint32_t collisionId = hasCollision ? collisionSop->opId : 0;
 	int64_t collisionCooks = hasCollision ? collisionSop->totalCooks : -1;
 	bool collisionChanged = collisionId != myCollisionSopId ||
-							( hasCollision && resetOnInput && collisionCooks != myCollisionSopCooks );
+							( hasCollision && resetOnCollision && collisionCooks != myCollisionSopCooks );
 
 	if ( collisionChanged )
 	{
@@ -293,8 +199,8 @@ void Box3DSolverCHOP::execute( CHOP_Output* output, const OP_Inputs* inputs, voi
 
 	core->advance( deltaSeconds, simulate );
 
-	// ---- output own group ----
-	writeTransformChannels( output, core, myOpId );
+	// Solver is world-only; transform channels stay zero for compatibility.
+	writeTransformChannels( output, nullptr, myOpId );
 }
 
 int32_t Box3DSolverCHOP::getNumInfoCHOPChans( void* )
@@ -376,6 +282,21 @@ void Box3DSolverCHOP::setupParameters( OP_ParameterManager* manager, void* )
 
 	{
 		OP_NumericParameter p;
+		p.name = WorkersName;
+		p.label = "Workers";
+		p.page = "Solver";
+		p.defaultValues[0] = 1;
+		p.minValues[0] = 1;
+		p.maxValues[0] = 16;
+		p.minSliders[0] = 1;
+		p.maxSliders[0] = 16;
+		p.clampMins[0] = true;
+		p.clampMaxes[0] = true;
+		manager->appendInt( p );
+	}
+
+	{
+		OP_NumericParameter p;
 		p.name = GroundName;
 		p.label = "Ground Plane";
 		p.page = "Solver";
@@ -397,6 +318,41 @@ void Box3DSolverCHOP::setupParameters( OP_ParameterManager* manager, void* )
 	}
 
 	{
+		OP_NumericParameter p;
+		p.name = ContainerName;
+		p.label = "Container";
+		p.page = "Solver";
+		p.defaultValues[0] = 0.0;
+		manager->appendToggle( p );
+	}
+
+	{
+		OP_NumericParameter p;
+		p.name = WallheightName;
+		p.label = "Wall Height";
+		p.page = "Solver";
+		p.defaultValues[0] = 4.0;
+		p.minValues[0] = 0.01;
+		p.minSliders[0] = 0.5;
+		p.maxSliders[0] = 20.0;
+		p.clampMins[0] = true;
+		manager->appendFloat( p );
+	}
+
+	{
+		OP_NumericParameter p;
+		p.name = WallthicknessName;
+		p.label = "Wall Thickness";
+		p.page = "Solver";
+		p.defaultValues[0] = 0.25;
+		p.minValues[0] = 0.01;
+		p.minSliders[0] = 0.01;
+		p.maxSliders[0] = 2.0;
+		p.clampMins[0] = true;
+		manager->appendFloat( p );
+	}
+
+	{
 		OP_StringParameter p;
 		p.name = CollisionsopName;
 		p.label = "Collision SOP";
@@ -404,33 +360,13 @@ void Box3DSolverCHOP::setupParameters( OP_ParameterManager* manager, void* )
 		manager->appendSOP( p );
 	}
 
-	// ---- Bodies page (own spawn group + demo grid) ----
-	appendBodyParameters( manager, "Bodies" );
-
 	{
 		OP_NumericParameter p;
-		p.name = BoxcountName;
-		p.label = "Demo Box Count";
-		p.page = "Bodies";
-		p.defaultValues[0] = 24;
-		p.minValues[0] = 1;
-		p.maxValues[0] = 4096;
-		p.minSliders[0] = 1;
-		p.maxSliders[0] = 256;
-		p.clampMins[0] = true;
-		p.clampMaxes[0] = true;
-		manager->appendInt( p );
-	}
-
-	{
-		OP_NumericParameter p;
-		p.name = SpawnheightName;
-		p.label = "Demo Spawn Height";
-		p.page = "Bodies";
-		p.defaultValues[0] = 5.0;
-		p.minSliders[0] = 0.0;
-		p.maxSliders[0] = 20.0;
-		manager->appendFloat( p );
+		p.name = ResetoncollisionName;
+		p.label = "Reset On Collision SOP Change";
+		p.page = "Solver";
+		p.defaultValues[0] = 1.0;
+		manager->appendToggle( p );
 	}
 }
 

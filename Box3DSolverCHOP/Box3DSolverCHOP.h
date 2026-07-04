@@ -4,10 +4,9 @@
 // Box3D Bodies CHOPs reference this node by path and contribute their own
 // spawn groups; this node steps the world once per frame.
 //
-// This node can also spawn bodies itself (Spawn SOP or, when it is alone
-// with no bodies nodes attached, a demo grid) and outputs the transforms of
-// ITS OWN bodies: tx ty tz rx ry rz (degrees, TD rotate order XYZ).
-// Bodies from Box3D Bodies nodes are output by those nodes, not this one.
+// This node does not spawn bodies or instance transforms.
+// Bodies come from Box3D Body SOP / Box3D Instances CHOP only.
+// The Solver output channels are kept for compatibility and stay at zero.
 // See touchdesigner/PLAN.md for the roadmap and the spawn attribute contract.
 
 #pragma once
@@ -16,8 +15,6 @@
 
 #include "Box3DTDCore.h"
 #include "TDB3Common.h"
-
-#include <vector>
 
 using namespace TD;
 
@@ -40,19 +37,10 @@ public:
 	virtual void pulsePressed( const char* name, void* reserved1 ) override;
 
 private:
-	std::vector<tdb3::SpawnBody> buildDemoGridDefs( const OP_Inputs* inputs, const tdb3::SpawnDefaults& defaults ) const;
-
 	const uint32_t myOpId;
 
 	// change tracking
-	tdb3::SpawnDefaults myLastDefaults;
-	uint32_t mySopId = 0;
-	int64_t mySopCooks = -1;
 	uint32_t myCollisionSopId = 0;
 	int64_t myCollisionSopCooks = -1;
-	int myLastBoxCount = -1;
-	float myLastSpawnHeight = -1.0f;
-	bool myLastDemoMode = false;
-	bool myGroupRegistered = false;
 	bool myResetPending = false;
 };

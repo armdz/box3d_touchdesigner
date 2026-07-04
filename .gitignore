@@ -1,5 +1,6 @@
 build/
 plugin/
+tox/
 .vs/
 .vscode/
 .idea/
@@ -8,3 +9,4 @@ plugin/
 CMakeUserPresets.json
 imgui.ini
 .DS_Store
+Thumbs.db

@@ -16,12 +16,71 @@ constexpr double kFixedTimeStep = 1.0 / 60.0;
 // Cap the number of fixed steps per advance so a long stall (file dialog,
 // heavy cook) doesn't make the solver spiral trying to catch up.
 constexpr int kMaxStepsPerAdvance = 4;
+constexpr int kHullVertexBudget = 32;
 
 struct Group
 {
 	std::vector<SpawnBody> defs;
 	std::vector<b3BodyId> bodies;
 };
+
+bool sameShapeMaterialAndType( const SpawnBody& a, const SpawnBody& b )
+{
+	if ( a.shape != b.shape || a.sizeX != b.sizeX || a.sizeY != b.sizeY || a.sizeZ != b.sizeZ ||
+		 a.density != b.density || a.friction != b.friction || a.restitution != b.restitution || a.type != b.type )
+	{
+		return false;
+	}
+
+	if ( a.hullPoints.size() != b.hullPoints.size() )
+	{
+		return false;
+	}
+
+	for ( size_t i = 0; i < a.hullPoints.size(); ++i )
+	{
+		if ( a.hullPoints[i] != b.hullPoints[i] )
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
+void setBodyTransformFromDef( b3BodyId bodyId, const SpawnBody& def )
+{
+	b3Quat q;
+	q.v.x = 0.0f;
+	q.v.y = 0.0f;
+	q.v.z = 0.0f;
+	q.s = 1.0f;
+
+	float lengthSq = def.qx * def.qx + def.qy * def.qy + def.qz * def.qz + def.qw * def.qw;
+	if ( lengthSq > 0.0001f )
+	{
+		float inv = 1.0f / sqrtf( lengthSq );
+		q.v.x = def.qx * inv;
+		q.v.y = def.qy * inv;
+		q.v.z = def.qz * inv;
+		q.s = def.qw * inv;
+	}
+
+	if ( def.type == 1 )
+	{
+		// Kinematic bodies should be driven by a target transform so Box3D can
+		// derive velocities and produce stable contacts with dynamic bodies.
+		b3WorldTransform target = b3WorldTransform_identity;
+		target.p = b3Pos{ def.px, def.py, def.pz };
+		target.q = q;
+		b3Body_SetTargetTransform( bodyId, target, (float)kFixedTimeStep, true );
+	}
+	else
+	{
+		b3Body_SetTransform( bodyId, b3Pos{ def.px, def.py, def.pz }, q );
+		b3Body_SetAwake( bodyId, true );
+	}
+}
 
 void createBodyFromDef( b3WorldId world, const SpawnBody& def, std::vector<b3BodyId>& outBodies )
 {
@@ -67,7 +126,7 @@ void createBodyFromDef( b3WorldId world, const SpawnBody& def, std::vector<b3Bod
 			int pointCount = (int)def.hullPoints.size() / 3;
 			if ( pointCount >= 4 )
 			{
-				b3HullData* hull = b3CreateHull( (const b3Vec3*)def.hullPoints.data(), pointCount, 64 );
+				b3HullData* hull = b3CreateHull( (const b3Vec3*)def.hullPoints.data(), pointCount, kHullVertexBudget );
 				if ( hull != nullptr )
 				{
 					// b3CreateHullShape clones into the world hull database,
@@ -100,6 +159,28 @@ void createBodyFromDef( b3WorldId world, const SpawnBody& def, std::vector<b3Bod
 	}
 
 	outBodies.push_back( bodyId );
+}
+
+void destroyGroupBodies( Group& group )
+{
+	for ( b3BodyId bodyId : group.bodies )
+	{
+		if ( B3_IS_NON_NULL( bodyId ) )
+		{
+			b3DestroyBody( bodyId );
+		}
+	}
+	group.bodies.clear();
+}
+
+void createGroupBodies( b3WorldId world, Group& group )
+{
+	group.bodies.clear();
+	group.bodies.reserve( group.defs.size() );
+	for ( const SpawnBody& def : group.defs )
+	{
+		createBodyFromDef( world, def, group.bodies );
+	}
 }
 
 } // namespace
@@ -148,7 +229,7 @@ struct SolverCore::Impl
 
 		b3WorldDef worldDef = b3DefaultWorldDef();
 		worldDef.gravity = b3Vec3{ settings.gravityX, settings.gravityY, settings.gravityZ };
-		worldDef.workerCount = 1;
+		worldDef.workerCount = settings.workerCount > 1 ? settings.workerCount : 1;
 		world = b3CreateWorld( &worldDef );
 
 		if ( settings.ground )
@@ -162,6 +243,30 @@ struct SolverCore::Impl
 			b3BoxHull groundBox = b3MakeBoxHull( half, 1.0f, half );
 			b3ShapeDef groundShapeDef = b3DefaultShapeDef();
 			b3CreateHullShape( groundId, &groundShapeDef, &groundBox.base );
+		}
+
+		if ( settings.container )
+		{
+			float half = 0.5f * settings.groundSize;
+			float halfHeight = 0.5f * ( settings.wallHeight > 0.01f ? settings.wallHeight : 0.01f );
+			float thickness = settings.wallThickness > 0.01f ? settings.wallThickness : 0.01f;
+			float halfThickness = 0.5f * thickness;
+
+			auto createWall = [&]( float px, float py, float pz, float hx, float hy, float hz ) {
+				b3BodyDef wallDef = b3DefaultBodyDef();
+				wallDef.position = b3Pos{ px, py, pz };
+				b3BodyId wallId = b3CreateBody( world, &wallDef );
+
+				b3ShapeDef wallShapeDef = b3DefaultShapeDef();
+				b3BoxHull wallHull = b3MakeBoxHull( hx, hy, hz );
+				b3CreateHullShape( wallId, &wallShapeDef, &wallHull.base );
+			};
+
+			// Four static walls around the play area, floor top at y=0.
+			createWall( 0.0f, halfHeight, half + halfThickness, half + thickness, halfHeight, halfThickness );
+			createWall( 0.0f, halfHeight, -( half + halfThickness ), half + thickness, halfHeight, halfThickness );
+			createWall( half + halfThickness, halfHeight, 0.0f, halfThickness, halfHeight, half + thickness );
+			createWall( -( half + halfThickness ), halfHeight, 0.0f, halfThickness, halfHeight, half + thickness );
 		}
 
 		if ( hasMesh && !meshIndices.empty() )
@@ -187,11 +292,7 @@ struct SolverCore::Impl
 		for ( auto& entry : groups )
 		{
 			Group& group = entry.second;
-			group.bodies.reserve( group.defs.size() );
-			for ( const SpawnBody& def : group.defs )
-			{
-				createBodyFromDef( world, def, group.bodies );
-			}
+			createGroupBodies( world, group );
 		}
 
 		accumulator = 0.0;
@@ -213,7 +314,9 @@ SolverCore::~SolverCore()
 void SolverCore::setWorldSettings( const WorldSettings& settings )
 {
 	Impl* m = myImpl;
-	if ( settings.ground != m->settings.ground || settings.groundSize != m->settings.groundSize )
+	if ( settings.ground != m->settings.ground || settings.groundSize != m->settings.groundSize ||
+		 settings.container != m->settings.container || settings.wallHeight != m->settings.wallHeight ||
+		 settings.wallThickness != m->settings.wallThickness )
 	{
 		m->dirty = true;
 	}
@@ -222,6 +325,7 @@ void SolverCore::setWorldSettings( const WorldSettings& settings )
 	if ( B3_IS_NON_NULL( m->world ) && !m->dirty )
 	{
 		b3World_SetGravity( m->world, b3Vec3{ settings.gravityX, settings.gravityY, settings.gravityZ } );
+		b3World_SetWorkerCount( m->world, settings.workerCount > 1 ? settings.workerCount : 1 );
 	}
 }
 
@@ -254,6 +358,52 @@ void SolverCore::clearCollisionMesh()
 void SolverCore::setGroup( uint32_t groupKey, std::vector<SpawnBody> defs )
 {
 	Impl* m = myImpl;
+	auto it = m->groups.find( groupKey );
+
+	// Fast path: world is live. Update only this group.
+	if ( it != m->groups.end() && B3_IS_NON_NULL( m->world ) && !m->dirty )
+	{
+		Group& group = it->second;
+		if ( group.bodies.size() == group.defs.size() && defs.size() == group.defs.size() )
+		{
+			bool compatible = true;
+			for ( size_t i = 0; i < defs.size(); ++i )
+			{
+				if ( !sameShapeMaterialAndType( group.defs[i], defs[i] ) )
+				{
+					compatible = false;
+					break;
+				}
+			}
+
+			if ( compatible )
+			{
+				for ( size_t i = 0; i < defs.size(); ++i )
+				{
+					setBodyTransformFromDef( group.bodies[i], defs[i] );
+				}
+
+				group.defs = std::move( defs );
+				return;
+			}
+		}
+
+		// Incompatible (shape/material/count/hull changed): recreate only this
+		// group's bodies in the current world, keep everyone else running.
+		destroyGroupBodies( group );
+		group.defs = std::move( defs );
+		createGroupBodies( m->world, group );
+		return;
+	}
+
+	if ( it == m->groups.end() && B3_IS_NON_NULL( m->world ) && !m->dirty )
+	{
+		Group& group = m->groups[groupKey];
+		group.defs = std::move( defs );
+		createGroupBodies( m->world, group );
+		return;
+	}
+
 	Group& group = m->groups[groupKey];
 	group.defs = std::move( defs );
 	group.bodies.clear();
@@ -266,6 +416,14 @@ void SolverCore::removeGroup( uint32_t groupKey )
 	auto it = m->groups.find( groupKey );
 	if ( it != m->groups.end() )
 	{
+		// Fast path: remove only this group's bodies when the world is live.
+		if ( B3_IS_NON_NULL( m->world ) && !m->dirty )
+		{
+			destroyGroupBodies( it->second );
+			m->groups.erase( it );
+			return;
+		}
+
 		m->groups.erase( it );
 		m->dirty = true;
 	}

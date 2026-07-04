@@ -2,6 +2,23 @@
 
 Contexto completo del proyecto de integración. Leer esto antes de tocar este repo.
 
+## Estado actual (2026-07)
+
+Este documento contiene historia por fases y partes ya no reflejan exactamente el runtime actual.
+Usar este bloque como fuente de verdad rápida:
+
+- **Solver world-only**: ya no hace spawn/demo propio ni entrega transforms de actores.
+  Los cuerpos los aportan `Box3dbody` y `Box3dinstances`.
+- **Mundo**: gravedad/substeps, piso opcional, contenedor estático opcional (4 paredes), Collision SOP estática,
+  y parámetro `Workers` para workerCount de Box3D.
+- **Actualización de grupos**:
+  - pose-only: update en caliente,
+  - cambios incompatibles (shape/material/count/hull): recreate local del grupo,
+  - evitar reset global del mundo salvo cambios de world/collision mesh.
+- **Kinematic**: updates de pose con `b3Body_SetTargetTransform(...)` para colisiones más estables con dinámicos.
+- **Body SOP**: seguimiento de animación rígida upstream para minimizar rebuild global; mantiene salida SOP transformada.
+- **Defaults de spawn/instances**: tamaño unitario (`1,1,1`).
+
 ## Objetivo
 
 Crear operadores nativos de TouchDesigner (C++ custom operators) que expongan el motor de

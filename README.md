@@ -12,8 +12,8 @@ between them.
 
 | Node | Family | Role |
 |---|---|---|
-| **Box3D Solver** (`Box3dsolver`) | CHOP | Owns one world: gravity, sub-steps, optional ground plane, optional static **Collision SOP** (triangle mesh). Steps the simulation once per frame. Can also spawn its own bodies (Spawn SOP, or a demo grid when alone). Outputs `tx ty tz rx ry rz` for its own bodies. |
-| **Box3D Body** (`Box3dbody`) | SOP | ONE rigid body. Wire geometry in and pick a shape: **Input Hull** (convex hull of the input points), or Box/Sphere/Capsule. Output is the input geometry transformed by the simulation every frame — wire it straight to a render. Body transform also on its Info CHOP. |
+| **Box3D Solver** (`Box3dsolver`) | CHOP | Owns one world: gravity, sub-steps, optional ground plane, optional static container walls, optional static **Collision SOP** (triangle mesh). Steps the simulation once per frame. It does not spawn bodies; body nodes feed the world. Output channels are compatibility zeros. |
+| **Box3D Body** (`Box3dbody`) | SOP | ONE rigid body. Wire geometry in and pick a shape: **Input Hull** (convex hull of the input points), or Box/Sphere/Capsule. Output is the input geometry transformed by the simulation every frame — wire it straight to a render. Body transform also on its Info CHOP. For rigid upstream SOP animation (Translate/Rotate/Transform SOP), the body follows pose updates without rebuilding the whole world. |
 | **Box3D Instances** (`Box3dinstances`) | CHOP | A group of bodies for instancing: each point of its Spawn SOP spawns one body (per-point attributes below). Outputs `tx ty tz rx ry rz`, one sample per body — feed Geometry COMP instancing (RX/RY/RZ are degrees, TD rotate order XYZ). |
 
 Body and Instances nodes bind to a solver through their **Solver** path parameter.
@@ -33,6 +33,36 @@ actors cook — no wires needed. All groups interact in the same world.
 | `orient` | 4 | initial rotation quaternion x y z w |
 
 Missing attributes fall back to the node's default parameters.
+
+Notes:
+
+- `size` is interpreted as full extents/diameter, and current defaults are unit-sized (`1,1,1`).
+- Body/Instances updates are automatic. There is no "Reset On Input Change" toggle for body spawn groups.
+
+## Wrapper TOX generation
+
+You can auto-generate basic wrapper `.tox` components from TouchDesigner with:
+
+- Script: `tools/td/generate_tox_wrappers.py`
+- Output folder: `tox/`
+
+How to run:
+
+1. Open a `.toe` located inside this repo (for example `samples/test.toe`).
+2. Create a Text DAT and paste the script contents, or run it from disk.
+3. Run the script (Alt+R in the Text DAT).
+
+Expected output files:
+
+- `tox/Box3D_Solver.tox`
+- `tox/Box3D_Body.tox`
+- `tox/Box3D_Instances.tox`
+
+These wrappers contain preconfigured CPlusPlus operators pointing to the DLLs in
+`plugin/`.
+
+If you run this script while TouchDesigner has an old plugin loaded from a locked path,
+close and reopen TD before exporting/using the wrappers.
 
 ## Building (Windows x64)
 
@@ -69,12 +99,21 @@ OP Create dialog (Custom family).
 
 ## Quick start
 
-1. Drop a **Box3D Solver** CHOP — with no inputs it runs a demo grid of falling boxes.
+1. Drop a **Box3D Solver** CHOP and configure world settings (gravity/ground/container/collision).
 2. Drop a Box SOP, deform it, wire it into a **Box3D Body** SOP, set its Solver parameter
    to the solver node, Shape = Input Hull, and wire the Body to a Geometry COMP. Play.
 3. For crowds: make a Grid SOP, point a **Box3D Instances** CHOP at it (Spawn SOP) and at
    the solver, then instance a Geometry COMP from its channels
    (TX/TY/TZ ← `tx ty tz`, RX/RY/RZ ← `rx ry rz`).
+
+## Behavior updates
+
+- Solver is world-only: no solver-owned demo spawn, no solver-owned actor output.
+- Group updates are local when possible:
+  - pose-only updates move existing bodies in-place,
+  - incompatible body changes (shape/material/count/hull) recreate only that group.
+- Kinematic bodies are driven with target transforms (not pure teleports), improving
+  contacts against dynamic bodies when externally animated.
 
 ## Repo layout
 
@@ -102,7 +141,13 @@ repo root
   delta (max 4 steps per cook), as Box3D recommends.
 - **Mesh lifetime**: Box3D references (does not copy) collision mesh data; the core keeps
   it alive and destroys it only after the world.
-- Simulation is CPU (Box3D), single worker for now; output channels are trivial in size.
+- Simulation is CPU (Box3D). The Solver `Workers` parameter maps to Box3D worker count.
+
+## Performance tips
+
+- Start with `Sub Steps = 2..4` and increase only if needed.
+- Increase `Workers` on CPUs with real performance cores for collision-heavy scenes.
+- For large crowds, prefer primitive colliders (box/sphere/capsule) over dense hulls.
 
 ## Licenses
 

@@ -14,6 +14,16 @@ Estado: Fases 0–4b completas. Nodos: **Box3D Solver CHOP** (mundo/step/Collisi
 mundos, box3d estático adentro). Pendiente: COMP wrappers .tox, eventos de contacto,
 Fase 5 (joints, fuerzas, kinematic targets).
 
+Update 2026-07:
+
+- Solver quedó **world-only** (sin spawn/demo propio; su salida CHOP de transform queda en cero por compatibilidad).
+- Se agregó contenedor estático opcional (4 paredes) y parámetro `Workers` para threading de Box3D.
+- `setGroup()` del core hace updates locales: si cambia solo pose, mueve en caliente; si cambia shape/material/count,
+  recrea solo ese grupo (sin reset global del mundo).
+- Kinematic updates usan `b3Body_SetTargetTransform(...)` para contactos más estables con dinámicos.
+- Body SOP intenta seguir animación rígida upstream (Transform SOP) sin rebuild global.
+- Defaults de tamaño para spawn/instances en tamaño unitario (`1,1,1`).
+
 Build:
 
 ```

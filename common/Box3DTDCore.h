@@ -30,7 +30,7 @@ struct SpawnBody
 	float px = 0.0f, py = 0.0f, pz = 0.0f;
 	float qx = 0.0f, qy = 0.0f, qz = 0.0f, qw = 1.0f;
 	int shape = 0; // 0 box, 1 sphere, 2 capsule, 3 convex hull
-	float sizeX = 0.5f, sizeY = 0.5f, sizeZ = 0.5f; // full sizes (primitive shapes)
+	float sizeX = 1.0f, sizeY = 1.0f, sizeZ = 1.0f; // full sizes (primitive shapes)
 	float density = 1.0f;
 	float friction = 0.6f;
 	float restitution = 0.0f;
@@ -53,6 +53,10 @@ struct WorldSettings
 	float gravityX = 0.0f, gravityY = -10.0f, gravityZ = 0.0f;
 	bool ground = true;
 	float groundSize = 20.0f;
+	bool container = false;
+	float wallHeight = 4.0f;
+	float wallThickness = 0.25f;
+	int workerCount = 1;
 	int subSteps = 4;
 };
 
@@ -71,6 +75,8 @@ public:
 
 	// Register/update/remove a spawn group. Any change rebuilds the whole
 	// world on the next advance(), respawning every group (deterministic).
+	// When possible (same body count + compatible body definitions), updates
+	// are applied live to just that group without resetting the world.
 	void setGroup( uint32_t groupKey, std::vector<SpawnBody> defs );
 	void removeGroup( uint32_t groupKey );
 	bool hasGroup( uint32_t groupKey ) const;

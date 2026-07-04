@@ -23,7 +23,6 @@ inline const char* kOutputChannelNames[kNumOutputChannels] = { "tx", "ty", "tz",
 // Shared parameter names for the body-defaults block (TD convention: capital
 // first letter, lowercase rest)
 constexpr char SpawnsopParName[] = "Spawnsop";
-constexpr char ResetoninputParName[] = "Resetoninput";
 constexpr char ShapeParName[] = "Shape";
 constexpr char SizeParName[] = "Size";
 constexpr char DensityParName[] = "Density";
@@ -32,7 +31,7 @@ constexpr char FrictionParName[] = "Friction";
 struct SpawnDefaults
 {
 	int shape = 0;
-	float sizeX = 0.5f, sizeY = 0.5f, sizeZ = 0.5f;
+	float sizeX = 1.0f, sizeY = 1.0f, sizeZ = 1.0f;
 	float density = 1.0f;
 	float friction = 0.6f;
 
@@ -59,8 +58,7 @@ inline SpawnDefaults readSpawnDefaults( const TD::OP_Inputs* inputs )
 	return d;
 }
 
-// Appends the shared body parameters (Spawn SOP, Reset On Input Change,
-// defaults) to the given page.
+// Appends the shared body parameters (Spawn SOP + defaults) to the given page.
 inline void appendBodyParameters( TD::OP_ParameterManager* manager, const char* page )
 {
 	{
@@ -69,15 +67,6 @@ inline void appendBodyParameters( TD::OP_ParameterManager* manager, const char* 
 		p.label = "Spawn SOP";
 		p.page = page;
 		manager->appendSOP( p );
-	}
-
-	{
-		TD::OP_NumericParameter p;
-		p.name = ResetoninputParName;
-		p.label = "Reset On Input Change";
-		p.page = page;
-		p.defaultValues[0] = 1.0;
-		manager->appendToggle( p );
 	}
 
 	{
@@ -98,7 +87,7 @@ inline void appendBodyParameters( TD::OP_ParameterManager* manager, const char* 
 		p.page = page;
 		for ( int i = 0; i < 3; ++i )
 		{
-			p.defaultValues[i] = 0.5;
+			p.defaultValues[i] = 1.0;
 			p.minValues[i] = 0.001;
 			p.minSliders[i] = 0.05;
 			p.maxSliders[i] = 4.0;

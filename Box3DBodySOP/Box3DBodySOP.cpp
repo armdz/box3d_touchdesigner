@@ -19,7 +19,6 @@ constexpr char TypeName[] = "Type";
 constexpr char DensityName[] = "Density";
 constexpr char FrictionName[] = "Friction";
 constexpr char RestitutionName[] = "Restitution";
-constexpr char ResetoninputName[] = "Resetoninput";
 
 // Menu index (input hull, box, sphere, capsule) → core SpawnBody::shape
 int menuShapeToCoreShape( int menuShape )
@@ -57,6 +56,240 @@ Vector rotateVector( const b3Matrix3& r, float lx, float ly, float lz )
 {
 	return Vector( r.cx.x * lx + r.cy.x * ly + r.cz.x * lz, r.cx.y * lx + r.cy.y * ly + r.cz.y * lz,
 				   r.cx.z * lx + r.cy.z * ly + r.cz.z * lz );
+}
+
+struct FrameBasis
+{
+	float x[3];
+	float y[3];
+	float z[3];
+};
+
+inline void vecSub( const Position& a, const Position& b, float out[3] )
+{
+	out[0] = a.x - b.x;
+	out[1] = a.y - b.y;
+	out[2] = a.z - b.z;
+}
+
+inline float vecDot( const float a[3], const float b[3] )
+{
+	return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+inline void vecCross( const float a[3], const float b[3], float out[3] )
+{
+	out[0] = a[1] * b[2] - a[2] * b[1];
+	out[1] = a[2] * b[0] - a[0] * b[2];
+	out[2] = a[0] * b[1] - a[1] * b[0];
+}
+
+inline float vecLenSq( const float v[3] )
+{
+	return vecDot( v, v );
+}
+
+bool normalizeVec( float v[3] )
+{
+	float lenSq = vecLenSq( v );
+	if ( lenSq < 1e-12f )
+	{
+		return false;
+	}
+	float inv = 1.0f / sqrtf( lenSq );
+	v[0] *= inv;
+	v[1] *= inv;
+	v[2] *= inv;
+	return true;
+}
+
+bool chooseAnchorIndices( const Position* points, int pointCount, float cx, float cy, float cz, int out[3] )
+{
+	if ( points == nullptr || pointCount < 3 )
+	{
+		return false;
+	}
+
+	int i0 = 0;
+	float best0 = -1.0f;
+	for ( int i = 0; i < pointCount; ++i )
+	{
+		float dx = points[i].x - cx;
+		float dy = points[i].y - cy;
+		float dz = points[i].z - cz;
+		float d2 = dx * dx + dy * dy + dz * dz;
+		if ( d2 > best0 )
+		{
+			best0 = d2;
+			i0 = i;
+		}
+	}
+
+	int i1 = i0 == 0 ? 1 : 0;
+	float best1 = -1.0f;
+	for ( int i = 0; i < pointCount; ++i )
+	{
+		if ( i == i0 )
+		{
+			continue;
+		}
+		float dx = points[i].x - points[i0].x;
+		float dy = points[i].y - points[i0].y;
+		float dz = points[i].z - points[i0].z;
+		float d2 = dx * dx + dy * dy + dz * dz;
+		if ( d2 > best1 )
+		{
+			best1 = d2;
+			i1 = i;
+		}
+	}
+
+	float e01[3] = { points[i1].x - points[i0].x, points[i1].y - points[i0].y, points[i1].z - points[i0].z };
+
+	int i2 = -1;
+	float bestAreaSq = -1.0f;
+	for ( int i = 0; i < pointCount; ++i )
+	{
+		if ( i == i0 || i == i1 )
+		{
+			continue;
+		}
+		float e02[3] = { points[i].x - points[i0].x, points[i].y - points[i0].y, points[i].z - points[i0].z };
+		float c[3];
+		vecCross( e01, e02, c );
+		float areaSq = vecLenSq( c );
+		if ( areaSq > bestAreaSq )
+		{
+			bestAreaSq = areaSq;
+			i2 = i;
+		}
+	}
+
+	if ( i2 < 0 || bestAreaSq < 1e-12f )
+	{
+		return false;
+	}
+
+	out[0] = i0;
+	out[1] = i1;
+	out[2] = i2;
+	return true;
+}
+
+bool buildFrameFromAnchors( const Position* points, int pointCount, const int anchors[3], FrameBasis& out )
+{
+	if ( points == nullptr || pointCount < 3 )
+	{
+		return false;
+	}
+	if ( anchors[0] < 0 || anchors[0] >= pointCount || anchors[1] < 0 || anchors[1] >= pointCount || anchors[2] < 0 ||
+		 anchors[2] >= pointCount )
+	{
+		return false;
+	}
+
+	const Position& p0 = points[anchors[0]];
+	const Position& p1 = points[anchors[1]];
+	const Position& p2 = points[anchors[2]];
+
+	out.x[0] = p1.x - p0.x;
+	out.x[1] = p1.y - p0.y;
+	out.x[2] = p1.z - p0.z;
+	if ( !normalizeVec( out.x ) )
+	{
+		return false;
+	}
+
+	float t[3] = { p2.x - p0.x, p2.y - p0.y, p2.z - p0.z };
+	vecCross( out.x, t, out.z );
+	if ( !normalizeVec( out.z ) )
+	{
+		return false;
+	}
+
+	vecCross( out.z, out.x, out.y );
+	return normalizeVec( out.y );
+}
+
+void quatFromFrame( const FrameBasis& f, float& qx, float& qy, float& qz, float& qw )
+{
+	float m00 = f.x[0], m01 = f.y[0], m02 = f.z[0];
+	float m10 = f.x[1], m11 = f.y[1], m12 = f.z[1];
+	float m20 = f.x[2], m21 = f.y[2], m22 = f.z[2];
+
+	float trace = m00 + m11 + m22;
+	if ( trace > 0.0f )
+	{
+		float s = sqrtf( trace + 1.0f ) * 2.0f;
+		qw = 0.25f * s;
+		qx = ( m21 - m12 ) / s;
+		qy = ( m02 - m20 ) / s;
+		qz = ( m10 - m01 ) / s;
+	}
+	else if ( m00 > m11 && m00 > m22 )
+	{
+		float s = sqrtf( 1.0f + m00 - m11 - m22 ) * 2.0f;
+		qw = ( m21 - m12 ) / s;
+		qx = 0.25f * s;
+		qy = ( m01 + m10 ) / s;
+		qz = ( m02 + m20 ) / s;
+	}
+	else if ( m11 > m22 )
+	{
+		float s = sqrtf( 1.0f + m11 - m00 - m22 ) * 2.0f;
+		qw = ( m02 - m20 ) / s;
+		qx = ( m01 + m10 ) / s;
+		qy = 0.25f * s;
+		qz = ( m12 + m21 ) / s;
+	}
+	else
+	{
+		float s = sqrtf( 1.0f + m22 - m00 - m11 ) * 2.0f;
+		qw = ( m10 - m01 ) / s;
+		qx = ( m02 + m20 ) / s;
+		qy = ( m12 + m21 ) / s;
+		qz = 0.25f * s;
+	}
+}
+
+float edgeLength( const Position& a, const Position& b )
+{
+	float dx = a.x - b.x;
+	float dy = a.y - b.y;
+	float dz = a.z - b.z;
+	return sqrtf( dx * dx + dy * dy + dz * dz );
+}
+
+void setBoundsFromPoints( SOP_Output* output, const Position* points, int count )
+{
+	if ( output == nullptr || points == nullptr || count <= 0 )
+	{
+		return;
+	}
+	BoundingBox bbox( points[0], points[0] );
+	for ( int i = 1; i < count; ++i )
+	{
+		bbox.enlargeBounds( points[i] );
+	}
+	output->setBoundingBox( bbox );
+}
+
+void setBoundsFromLocalPoints( SOP_Output* output, const BodyTransform& t, const std::vector<float>& localPoints )
+{
+	if ( output == nullptr || localPoints.size() < 3 )
+	{
+		return;
+	}
+
+	b3Matrix3 r = rotationFromTransform( t );
+	Position p0 = applyTransform( r, t, localPoints[0], localPoints[1], localPoints[2] );
+	BoundingBox bbox( p0, p0 );
+	for ( size_t i = 3; i + 2 < localPoints.size(); i += 3 )
+	{
+		Position p = applyTransform( r, t, localPoints[i], localPoints[i + 1], localPoints[i + 2] );
+		bbox.enlargeBounds( p );
+	}
+	output->setBoundingBox( bbox );
 }
 
 } // namespace
@@ -165,6 +398,9 @@ void Box3DBodySOP::execute( SOP_Output* output, const OP_Inputs* inputs, void* )
 										   : "The Solver parameter does not point to a Box3D Solver CHOP.";
 		unregisterGroup();
 		mySolverOpId = 0;
+		myInputFrameValid = false;
+		myInputPointCount = 0;
+		myHullLocalPoints.clear();
 
 		// No simulation: show the input (or the primitive preview) untransformed
 		BodyTransform identity = { 0, 0, 0, 0, 0, 0, 1 };
@@ -191,15 +427,12 @@ void Box3DBodySOP::execute( SOP_Output* output, const OP_Inputs* inputs, void* )
 		mySolverOpId = solverOpId;
 	}
 
-	inputs->enablePar( ResetoninputName, input != nullptr );
 	inputs->enablePar( PositionName, input == nullptr );
-
-	bool resetOnInput = inputs->getParInt( ResetoninputName ) != 0;
 	uint32_t sopId = input != nullptr ? input->opId : 0;
 	int64_t sopCooks = input != nullptr ? input->totalCooks : -1;
 
 	bool changed = !myGroupRegistered || settings != myLastSettings || sopId != mySopId ||
-				   ( input != nullptr && resetOnInput && sopCooks != mySopCooks );
+				   ( input != nullptr && sopCooks != mySopCooks );
 
 	if ( changed )
 	{
@@ -214,7 +447,9 @@ void Box3DBodySOP::execute( SOP_Output* output, const OP_Inputs* inputs, void* )
 
 		if ( input != nullptr )
 		{
-			// Body origin = input centroid; the input pose is the spawn pose
+			// Body origin = input centroid; derive rigid pose from the input
+			// geometry frame so Transform SOP animation drives the body pose
+			// without changing hull topology every frame.
 			int pointCount = input->getNumPoints();
 			const Position* points = input->getPointPositions();
 
@@ -240,14 +475,122 @@ void Box3DBodySOP::execute( SOP_Output* output, const OP_Inputs* inputs, void* )
 			def.pz = myCentroid[2];
 			def.shape = menuShapeToCoreShape( settings.shape );
 
+			if ( pointCount >= 3 )
+			{
+				bool rebuildReference = !myInputFrameValid || myInputPointCount != pointCount || sopId != mySopId;
+				FrameBasis referenceFrame = {};
+				FrameBasis currentFrame = {};
+
+				if ( !rebuildReference )
+				{
+					if ( !buildFrameFromAnchors( points, pointCount, myInputAnchor, currentFrame ) )
+					{
+						rebuildReference = true;
+					}
+					else
+					{
+						float e0 = edgeLength( points[myInputAnchor[0]], points[myInputAnchor[1]] );
+						float e1 = edgeLength( points[myInputAnchor[0]], points[myInputAnchor[2]] );
+						float e2 = edgeLength( points[myInputAnchor[1]], points[myInputAnchor[2]] );
+						float maxErr = fabsf( e0 - myInputRefEdgeLen[0] );
+						if ( fabsf( e1 - myInputRefEdgeLen[1] ) > maxErr )
+						{
+							maxErr = fabsf( e1 - myInputRefEdgeLen[1] );
+						}
+						if ( fabsf( e2 - myInputRefEdgeLen[2] ) > maxErr )
+						{
+							maxErr = fabsf( e2 - myInputRefEdgeLen[2] );
+						}
+						if ( maxErr > 1e-4f )
+						{
+							rebuildReference = true;
+						}
+					}
+				}
+
+				if ( rebuildReference )
+				{
+					if ( chooseAnchorIndices( points, pointCount, myCentroid[0], myCentroid[1], myCentroid[2], myInputAnchor ) &&
+						 buildFrameFromAnchors( points, pointCount, myInputAnchor, referenceFrame ) )
+					{
+						myInputFrameValid = true;
+						myInputPointCount = pointCount;
+						myInputRefEdgeLen[0] = edgeLength( points[myInputAnchor[0]], points[myInputAnchor[1]] );
+						myInputRefEdgeLen[1] = edgeLength( points[myInputAnchor[0]], points[myInputAnchor[2]] );
+						myInputRefEdgeLen[2] = edgeLength( points[myInputAnchor[1]], points[myInputAnchor[2]] );
+
+						myHullLocalPoints.clear();
+						myHullLocalPoints.reserve( pointCount * 3 );
+						for ( int i = 0; i < pointCount; ++i )
+						{
+							float rel[3] = { points[i].x - myCentroid[0], points[i].y - myCentroid[1], points[i].z - myCentroid[2] };
+							myHullLocalPoints.push_back( vecDot( rel, referenceFrame.x ) );
+							myHullLocalPoints.push_back( vecDot( rel, referenceFrame.y ) );
+							myHullLocalPoints.push_back( vecDot( rel, referenceFrame.z ) );
+						}
+
+						currentFrame = referenceFrame;
+					}
+					else
+					{
+						myInputFrameValid = false;
+						myInputPointCount = 0;
+						myHullLocalPoints.clear();
+					}
+				}
+
+				if ( myInputFrameValid && buildFrameFromAnchors( points, pointCount, myInputAnchor, currentFrame ) )
+				{
+					quatFromFrame( currentFrame, def.qx, def.qy, def.qz, def.qw );
+				}
+			}
+
+
 			if ( def.shape == 3 )
 			{
-				def.hullPoints.reserve( pointCount * 3 );
-				for ( int i = 0; i < pointCount; ++i )
+				if ( (int)myHullLocalPoints.size() == pointCount * 3 )
 				{
-					def.hullPoints.push_back( points[i].x - myCentroid[0] );
-					def.hullPoints.push_back( points[i].y - myCentroid[1] );
-					def.hullPoints.push_back( points[i].z - myCentroid[2] );
+					def.hullPoints = myHullLocalPoints;
+				}
+				else
+				{
+					def.hullPoints.reserve( pointCount * 3 );
+					for ( int i = 0; i < pointCount; ++i )
+					{
+						def.hullPoints.push_back( points[i].x - myCentroid[0] );
+						def.hullPoints.push_back( points[i].y - myCentroid[1] );
+						def.hullPoints.push_back( points[i].z - myCentroid[2] );
+					}
+				}
+
+				// If hull creation degenerates, core falls back to a box using sizeX/Y/Z.
+				// Keep these in sync with the local hull bounds so collision matches
+				// the visible geometry orientation/extent.
+				if ( def.hullPoints.size() >= 3 )
+				{
+					float minX = def.hullPoints[0], maxX = def.hullPoints[0];
+					float minY = def.hullPoints[1], maxY = def.hullPoints[1];
+					float minZ = def.hullPoints[2], maxZ = def.hullPoints[2];
+					for ( size_t i = 3; i + 2 < def.hullPoints.size(); i += 3 )
+					{
+						if ( def.hullPoints[i] < minX )
+							minX = def.hullPoints[i];
+						if ( def.hullPoints[i] > maxX )
+							maxX = def.hullPoints[i];
+						if ( def.hullPoints[i + 1] < minY )
+							minY = def.hullPoints[i + 1];
+						if ( def.hullPoints[i + 1] > maxY )
+							maxY = def.hullPoints[i + 1];
+						if ( def.hullPoints[i + 2] < minZ )
+							minZ = def.hullPoints[i + 2];
+						if ( def.hullPoints[i + 2] > maxZ )
+							maxZ = def.hullPoints[i + 2];
+					}
+
+					constexpr float kMinExtent = 0.001f;
+					def.sizeX = ( maxX - minX ) > kMinExtent ? ( maxX - minX ) : kMinExtent;
+					def.sizeY = ( maxY - minY ) > kMinExtent ? ( maxY - minY ) : kMinExtent;
+					def.sizeZ = ( maxZ - minZ ) > kMinExtent ? ( maxZ - minZ ) : kMinExtent;
 				}
 			}
 		}
@@ -255,6 +598,9 @@ void Box3DBodySOP::execute( SOP_Output* output, const OP_Inputs* inputs, void* )
 		{
 			// No input: primitive at the Position parameter ("Input Hull"
 			// falls back to a box)
+			myInputFrameValid = false;
+			myInputPointCount = 0;
+			myHullLocalPoints.clear();
 			myCentroid[0] = myCentroid[1] = myCentroid[2] = 0.0f;
 			def.px = settings.posX;
 			def.py = settings.posY;
@@ -296,6 +642,18 @@ void Box3DBodySOP::outputTransformedInput( SOP_Output* output, const OP_SOPInput
 		Position p = applyTransform( r, t, points[i].x - myCentroid[0], points[i].y - myCentroid[1],
 									 points[i].z - myCentroid[2] );
 		output->addPoint( p );
+	}
+
+	if ( pointCount > 0 )
+	{
+		std::vector<Position> worldPoints;
+		worldPoints.reserve( pointCount );
+		for ( int i = 0; i < pointCount; ++i )
+		{
+			worldPoints.push_back(
+				applyTransform( r, t, points[i].x - myCentroid[0], points[i].y - myCentroid[1], points[i].z - myCentroid[2] ) );
+		}
+		setBoundsFromPoints( output, worldPoints.data(), pointCount );
 	}
 
 	if ( input->hasNormals() )
@@ -342,13 +700,18 @@ void Box3DBodySOP::outputPrimitiveMesh( SOP_Output* output, const BodySettings& 
 		float hx = 0.5f * s.sizeX, hy = 0.5f * s.sizeY, hz = 0.5f * s.sizeZ;
 		const float corners[8][3] = { { -hx, -hy, -hz }, { hx, -hy, -hz }, { hx, hy, -hz }, { -hx, hy, -hz },
 									  { -hx, -hy, hz },	 { hx, -hy, hz },  { hx, hy, hz },	{ -hx, hy, hz } };
+		std::vector<Position> worldPoints;
+		worldPoints.reserve( 8 );
 		for ( int i = 0; i < 8; ++i )
 		{
-			output->addPoint( applyTransform( r, t, corners[i][0], corners[i][1], corners[i][2] ) );
+			Position p = applyTransform( r, t, corners[i][0], corners[i][1], corners[i][2] );
+			output->addPoint( p );
+			worldPoints.push_back( p );
 			float inv = 1.0f / sqrtf( corners[i][0] * corners[i][0] + corners[i][1] * corners[i][1] +
 									  corners[i][2] * corners[i][2] + 1e-12f );
 			output->setNormal( rotateVector( r, corners[i][0] * inv, corners[i][1] * inv, corners[i][2] * inv ), i );
 		}
+		setBoundsFromPoints( output, worldPoints.data(), (int)worldPoints.size() );
 		const int32_t tris[36] = { 0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4,
 								   2, 3, 7, 2, 7, 6, 1, 2, 6, 1, 6, 5, 0, 4, 7, 0, 7, 3 };
 		output->addTriangles( tris, 12 );
@@ -388,6 +751,14 @@ void Box3DBodySOP::outputPrimitiveMesh( SOP_Output* output, const BodySettings& 
 			++pointIndex;
 		}
 	}
+
+	// Coarse but stable bounds for sphere/capsule preview.
+	float halfY = coreShape == 2 ? ( 0.5f * s.sizeY > radius ? 0.5f * s.sizeY : radius ) : radius;
+	std::vector<float> localBoundsPts = {
+		-radius, -halfY, -radius, radius, -halfY, -radius, radius, halfY, -radius, -radius, halfY, -radius,
+		-radius, -halfY, radius,  radius, -halfY, radius,  radius, halfY, radius,  -radius, halfY, radius
+	};
+	setBoundsFromLocalPoints( output, t, localBoundsPts );
 
 	for ( int ring = 0; ring < kRings; ++ring )
 	{
@@ -540,12 +911,4 @@ void Box3DBodySOP::setupParameters( OP_ParameterManager* manager, void* )
 		manager->appendFloat( p );
 	}
 
-	{
-		OP_NumericParameter p;
-		p.name = ResetoninputName;
-		p.label = "Reset On Input Change";
-		p.page = "Body";
-		p.defaultValues[0] = 1.0;
-		manager->appendToggle( p );
-	}
 }

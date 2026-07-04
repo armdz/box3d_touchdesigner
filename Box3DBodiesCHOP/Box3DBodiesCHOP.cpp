@@ -123,17 +123,13 @@ void Box3DBodiesCHOP::execute( CHOP_Output* output, const OP_Inputs* inputs, voi
 		unregisterGroup();
 		mySolverOpId = solverOpId;
 	}
-
-	inputs->enablePar( ResetoninputParName, spawnSop != nullptr );
-
-	bool resetOnInput = inputs->getParInt( ResetoninputParName ) != 0;
 	SpawnDefaults defaults = readSpawnDefaults( inputs );
 
 	uint32_t sopId = spawnSop != nullptr ? spawnSop->opId : 0;
 	int64_t sopCooks = spawnSop != nullptr ? spawnSop->totalCooks : -1;
 
 	bool groupChanged = !myGroupRegistered || defaults != myLastDefaults || sopId != mySopId ||
-						( spawnSop != nullptr && resetOnInput && sopCooks != mySopCooks );
+						( spawnSop != nullptr && sopCooks != mySopCooks );
 
 	if ( groupChanged )
 	{

@@ -78,6 +78,15 @@ private:
 	// output geometry is rebuilt relative to this every frame
 	float myCentroid[3] = { 0.0f, 0.0f, 0.0f };
 
+	// Cached frame for input-driven rigid animation. For Input Hull we keep the
+	// local hull points stable and update pose (p,q) from this frame, so
+	// Transform SOP animation does not force a full-world rebuild every frame.
+	bool myInputFrameValid = false;
+	int myInputPointCount = 0;
+	int myInputAnchor[3] = { 0, 0, 0 };
+	float myInputRefEdgeLen[3] = { 0.0f, 0.0f, 0.0f };
+	std::vector<float> myHullLocalPoints;
+
 	// last transform, for the Info CHOP
 	tdb3::BodyTransform myTransform = { 0, 0, 0, 0, 0, 0, 1 };
 
