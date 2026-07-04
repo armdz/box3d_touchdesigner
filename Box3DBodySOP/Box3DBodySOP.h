@@ -40,6 +40,7 @@ public:
 	virtual void getWarningString( OP_String* warning, void* reserved1 ) override;
 
 	virtual void setupParameters( OP_ParameterManager* manager, void* reserved1 ) override;
+	virtual void pulsePressed( const char* name, void* reserved1 ) override;
 
 private:
 	struct BodySettings
@@ -73,6 +74,7 @@ private:
 	uint32_t mySopId = 0;
 	int64_t mySopCooks = -1;
 	bool myGroupRegistered = false;
+	bool myResetPending = false;
 
 	// body origin used at spawn (input centroid or Position parameter);
 	// output geometry is rebuilt relative to this every frame
@@ -82,6 +84,9 @@ private:
 	// local hull points stable and update pose (p,q) from this frame, so
 	// Transform SOP animation does not force a full-world rebuild every frame.
 	bool myInputFrameValid = false;
+	// Source rigid frame quaternion from the current input SOP cook. Used to
+	// rotate normals with a relative transform when local hull caching is active.
+	float myInputSourceQ[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
 	int myInputPointCount = 0;
 	int myInputAnchor[3] = { 0, 0, 0 };
 	float myInputRefEdgeLen[3] = { 0.0f, 0.0f, 0.0f };

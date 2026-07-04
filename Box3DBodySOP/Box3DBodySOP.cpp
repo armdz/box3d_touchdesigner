@@ -5,6 +5,7 @@
 #include "box3d/math_functions.h"
 
 #include <cmath>
+#include <cstring>
 
 using namespace tdb3;
 
@@ -12,6 +13,7 @@ namespace
 {
 
 constexpr char SolverName[] = "Solver";
+constexpr char ResetName[] = "Reset";
 constexpr char ShapeName[] = "Shape";
 constexpr char SizeName[] = "Size";
 constexpr char PositionName[] = "Position";
@@ -44,6 +46,40 @@ b3Matrix3 rotationFromTransform( const BodyTransform& t )
 	q.v.z = t.qz;
 	q.s = t.qw;
 	return b3MakeMatrixFromQuat( q );
+}
+
+b3Matrix3 rotationFromQuat( float qx, float qy, float qz, float qw )
+{
+	b3Quat q;
+	q.v.x = qx;
+	q.v.y = qy;
+	q.v.z = qz;
+	q.s = qw;
+	return b3MakeMatrixFromQuat( q );
+}
+
+b3Matrix3 transposeMatrix( const b3Matrix3& m )
+{
+	b3Matrix3 t;
+	t.cx = b3Vec3{ m.cx.x, m.cy.x, m.cz.x };
+	t.cy = b3Vec3{ m.cx.y, m.cy.y, m.cz.y };
+	t.cz = b3Vec3{ m.cx.z, m.cy.z, m.cz.z };
+	return t;
+}
+
+b3Matrix3 multiplyMatrix( const b3Matrix3& a, const b3Matrix3& b )
+{
+	b3Matrix3 c;
+	c.cx = b3Vec3{ a.cx.x * b.cx.x + a.cy.x * b.cx.y + a.cz.x * b.cx.z,
+					  a.cx.y * b.cx.x + a.cy.y * b.cx.y + a.cz.y * b.cx.z,
+					  a.cx.z * b.cx.x + a.cy.z * b.cx.y + a.cz.z * b.cx.z };
+	c.cy = b3Vec3{ a.cx.x * b.cy.x + a.cy.x * b.cy.y + a.cz.x * b.cy.z,
+					  a.cx.y * b.cy.x + a.cy.y * b.cy.y + a.cz.y * b.cy.z,
+					  a.cx.z * b.cy.x + a.cy.z * b.cy.y + a.cz.z * b.cy.z };
+	c.cz = b3Vec3{ a.cx.x * b.cz.x + a.cy.x * b.cz.y + a.cz.x * b.cz.z,
+					  a.cx.y * b.cz.x + a.cy.y * b.cz.y + a.cz.y * b.cz.z,
+					  a.cx.z * b.cz.x + a.cy.z * b.cz.y + a.cz.z * b.cz.z };
+	return c;
 }
 
 Position applyTransform( const b3Matrix3& r, const BodyTransform& t, float lx, float ly, float lz )
@@ -399,6 +435,10 @@ void Box3DBodySOP::execute( SOP_Output* output, const OP_Inputs* inputs, void* )
 		unregisterGroup();
 		mySolverOpId = 0;
 		myInputFrameValid = false;
+		myInputSourceQ[0] = 0.0f;
+		myInputSourceQ[1] = 0.0f;
+		myInputSourceQ[2] = 0.0f;
+		myInputSourceQ[3] = 1.0f;
 		myInputPointCount = 0;
 		myHullLocalPoints.clear();
 
@@ -425,6 +465,22 @@ void Box3DBodySOP::execute( SOP_Output* output, const OP_Inputs* inputs, void* )
 	{
 		unregisterGroup();
 		mySolverOpId = solverOpId;
+	}
+
+	if ( myResetPending )
+	{
+		core->removeGroup( myOpId );
+		myGroupRegistered = false;
+		mySopId = 0;
+		mySopCooks = -1;
+		myInputFrameValid = false;
+		myInputSourceQ[0] = 0.0f;
+		myInputSourceQ[1] = 0.0f;
+		myInputSourceQ[2] = 0.0f;
+		myInputSourceQ[3] = 1.0f;
+		myInputPointCount = 0;
+		myHullLocalPoints.clear();
+		myResetPending = false;
 	}
 
 	inputs->enablePar( PositionName, input == nullptr );
@@ -475,7 +531,7 @@ void Box3DBodySOP::execute( SOP_Output* output, const OP_Inputs* inputs, void* )
 			def.pz = myCentroid[2];
 			def.shape = menuShapeToCoreShape( settings.shape );
 
-			if ( pointCount >= 3 )
+			if ( def.shape == 3 && pointCount >= 3 )
 			{
 				bool rebuildReference = !myInputFrameValid || myInputPointCount != pointCount || sopId != mySopId;
 				FrameBasis referenceFrame = {};
@@ -542,7 +598,31 @@ void Box3DBodySOP::execute( SOP_Output* output, const OP_Inputs* inputs, void* )
 				if ( myInputFrameValid && buildFrameFromAnchors( points, pointCount, myInputAnchor, currentFrame ) )
 				{
 					quatFromFrame( currentFrame, def.qx, def.qy, def.qz, def.qw );
+					myInputSourceQ[0] = def.qx;
+					myInputSourceQ[1] = def.qy;
+					myInputSourceQ[2] = def.qz;
+					myInputSourceQ[3] = def.qw;
 				}
+				else
+				{
+					myInputSourceQ[0] = 0.0f;
+					myInputSourceQ[1] = 0.0f;
+					myInputSourceQ[2] = 0.0f;
+					myInputSourceQ[3] = 1.0f;
+				}
+			}
+			else
+			{
+				// Primitive colliders with SOP input keep identity orientation by
+				// default; using the anchor frame here can introduce arbitrary
+				// initial rotations on symmetric meshes (for example a default Box SOP).
+				myInputFrameValid = false;
+				myInputSourceQ[0] = 0.0f;
+				myInputSourceQ[1] = 0.0f;
+				myInputSourceQ[2] = 0.0f;
+				myInputSourceQ[3] = 1.0f;
+				myInputPointCount = 0;
+				myHullLocalPoints.clear();
 			}
 
 
@@ -599,6 +679,10 @@ void Box3DBodySOP::execute( SOP_Output* output, const OP_Inputs* inputs, void* )
 			// No input: primitive at the Position parameter ("Input Hull"
 			// falls back to a box)
 			myInputFrameValid = false;
+			myInputSourceQ[0] = 0.0f;
+			myInputSourceQ[1] = 0.0f;
+			myInputSourceQ[2] = 0.0f;
+			myInputSourceQ[3] = 1.0f;
 			myInputPointCount = 0;
 			myHullLocalPoints.clear();
 			myCentroid[0] = myCentroid[1] = myCentroid[2] = 0.0f;
@@ -636,11 +720,104 @@ void Box3DBodySOP::outputTransformedInput( SOP_Output* output, const OP_SOPInput
 
 	int pointCount = input->getNumPoints();
 	const Position* points = input->getPointPositions();
+	bool useCachedLocalHull = ( myLastSettings.shape == 0 ) && myInputFrameValid &&
+									( (int)myHullLocalPoints.size() == pointCount * 3 );
+	const SOP_NormalInfo* normalInfo = input->hasNormals() ? input->getNormals() : nullptr;
+	bool hasPointNormals = normalInfo != nullptr && normalInfo->normals != nullptr &&
+					 normalInfo->attribSet == AttribSet::Point && normalInfo->numNormals >= pointCount;
+	bool hasVertexNormals = normalInfo != nullptr && normalInfo->normals != nullptr &&
+					  normalInfo->attribSet == AttribSet::Vertex && normalInfo->numNormals >= input->getNumVertices();
+	bool hasPrimitiveNormals = normalInfo != nullptr && normalInfo->normals != nullptr &&
+						 normalInfo->attribSet == AttribSet::Primitive && normalInfo->numNormals >= input->getNumPrimitives();
+
+	b3Matrix3 normalRot = r;
+	if ( useCachedLocalHull )
+	{
+		b3Matrix3 sourceR = rotationFromQuat( myInputSourceQ[0], myInputSourceQ[1], myInputSourceQ[2], myInputSourceQ[3] );
+		b3Matrix3 sourceInv = transposeMatrix( sourceR );
+		normalRot = multiplyMatrix( r, sourceInv );
+	}
+
+	auto getLocalPoint = [&]( int srcPointIndex, float& lx, float& ly, float& lz ) {
+		if ( useCachedLocalHull )
+		{
+			lx = myHullLocalPoints[srcPointIndex * 3 + 0];
+			ly = myHullLocalPoints[srcPointIndex * 3 + 1];
+			lz = myHullLocalPoints[srcPointIndex * 3 + 2];
+		}
+		else
+		{
+			lx = points[srcPointIndex].x - myCentroid[0];
+			ly = points[srcPointIndex].y - myCentroid[1];
+			lz = points[srcPointIndex].z - myCentroid[2];
+		}
+	};
+
+	// Vertex/primitive normals cannot be represented on shared points without
+	// smoothing artifacts. Expand points per primitive vertex to preserve them.
+	if ( hasVertexNormals || hasPrimitiveNormals )
+	{
+		std::vector<Position> worldPoints;
+		worldPoints.reserve( input->getNumVertices() );
+
+		int primCount = input->getNumPrimitives();
+		for ( int i = 0; i < primCount; ++i )
+		{
+			const SOP_PrimitiveInfo& prim = input->getPrimitive( i );
+			if ( prim.type != PrimitiveType::Polygon || prim.numVertices < 3 )
+			{
+				continue;
+			}
+
+			std::vector<int32_t> remapped;
+			remapped.reserve( prim.numVertices );
+
+			for ( int v = 0; v < prim.numVertices; ++v )
+			{
+				int srcPointIndex = prim.pointIndices[v];
+				float lx, ly, lz;
+				getLocalPoint( srcPointIndex, lx, ly, lz );
+
+				Position p = applyTransform( r, t, lx, ly, lz );
+				int32_t outPointIndex = output->addPoint( p );
+				worldPoints.push_back( p );
+
+				Vector n;
+				if ( hasVertexNormals )
+				{
+					int normalIndex = prim.pointIndicesOffset + v;
+					const Vector& inN = normalInfo->normals[normalIndex];
+					n = rotateVector( normalRot, inN.x, inN.y, inN.z );
+				}
+				else
+				{
+					const Vector& inN = normalInfo->normals[i];
+					n = rotateVector( normalRot, inN.x, inN.y, inN.z );
+				}
+				output->setNormal( n, outPointIndex );
+				remapped.push_back( outPointIndex );
+			}
+
+			for ( int v = 1; v < prim.numVertices - 1; ++v )
+			{
+				output->addTriangle( remapped[0], remapped[v], remapped[v + 1] );
+			}
+		}
+
+		if ( !worldPoints.empty() )
+		{
+			setBoundsFromPoints( output, worldPoints.data(), (int)worldPoints.size() );
+		}
+
+		return;
+	}
 
 	for ( int i = 0; i < pointCount; ++i )
 	{
-		Position p = applyTransform( r, t, points[i].x - myCentroid[0], points[i].y - myCentroid[1],
-									 points[i].z - myCentroid[2] );
+		float lx, ly, lz;
+		getLocalPoint( i, lx, ly, lz );
+
+		Position p = applyTransform( r, t, lx, ly, lz );
 		output->addPoint( p );
 	}
 
@@ -650,22 +827,19 @@ void Box3DBodySOP::outputTransformedInput( SOP_Output* output, const OP_SOPInput
 		worldPoints.reserve( pointCount );
 		for ( int i = 0; i < pointCount; ++i )
 		{
-			worldPoints.push_back(
-				applyTransform( r, t, points[i].x - myCentroid[0], points[i].y - myCentroid[1], points[i].z - myCentroid[2] ) );
+			float lx, ly, lz;
+			getLocalPoint( i, lx, ly, lz );
+			worldPoints.push_back( applyTransform( r, t, lx, ly, lz ) );
 		}
 		setBoundsFromPoints( output, worldPoints.data(), pointCount );
 	}
 
-	if ( input->hasNormals() )
+	if ( hasPointNormals )
 	{
-		const SOP_NormalInfo* normalInfo = input->getNormals();
-		if ( normalInfo != nullptr && normalInfo->normals != nullptr )
+		for ( int i = 0; i < pointCount; ++i )
 		{
-			for ( int i = 0; i < pointCount; ++i )
-			{
-				const Vector& n = normalInfo->normals[i];
-				output->setNormal( rotateVector( r, n.x, n.y, n.z ), i );
-			}
+			const Vector& n = normalInfo->normals[i];
+			output->setNormal( rotateVector( normalRot, n.x, n.y, n.z ), i );
 		}
 	}
 
@@ -819,6 +993,14 @@ void Box3DBodySOP::setupParameters( OP_ParameterManager* manager, void* )
 	}
 
 	{
+		OP_NumericParameter p;
+		p.name = ResetName;
+		p.label = "Reset";
+		p.page = "Body";
+		manager->appendPulse( p );
+	}
+
+	{
 		OP_StringParameter p;
 		p.name = ShapeName;
 		p.label = "Shape";
@@ -911,4 +1093,12 @@ void Box3DBodySOP::setupParameters( OP_ParameterManager* manager, void* )
 		manager->appendFloat( p );
 	}
 
+}
+
+void Box3DBodySOP::pulsePressed( const char* name, void* )
+{
+	if ( std::strcmp( name, ResetName ) == 0 )
+	{
+		myResetPending = true;
+	}
 }

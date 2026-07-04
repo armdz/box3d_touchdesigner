@@ -48,6 +48,11 @@ bool sameShapeMaterialAndType( const SpawnBody& a, const SpawnBody& b )
 	return true;
 }
 
+bool samePose( const SpawnBody& a, const SpawnBody& b )
+{
+	return a.px == b.px && a.py == b.py && a.pz == b.pz && a.qx == b.qx && a.qy == b.qy && a.qz == b.qz && a.qw == b.qw;
+}
+
 void setBodyTransformFromDef( b3BodyId bodyId, const SpawnBody& def )
 {
 	b3Quat q;
@@ -380,7 +385,13 @@ void SolverCore::setGroup( uint32_t groupKey, std::vector<SpawnBody> defs )
 			{
 				for ( size_t i = 0; i < defs.size(); ++i )
 				{
-					setBodyTransformFromDef( group.bodies[i], defs[i] );
+					// SOP/CHOP cooks can call setGroup repeatedly with identical
+					// defs; avoid re-applying transforms when pose is unchanged,
+					// otherwise dynamic bodies get effectively teleported every cook.
+					if ( !samePose( group.defs[i], defs[i] ) )
+					{
+						setBodyTransformFromDef( group.bodies[i], defs[i] );
+					}
 				}
 
 				group.defs = std::move( defs );

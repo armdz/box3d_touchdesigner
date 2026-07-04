@@ -1,11 +1,14 @@
 #include "Box3DBodiesCHOP.h"
 
+#include <cstring>
+
 using namespace tdb3;
 
 namespace
 {
 
 constexpr char SolverName[] = "Solver";
+constexpr char ResetName[] = "Reset";
 
 } // namespace
 
@@ -125,6 +128,15 @@ void Box3DBodiesCHOP::execute( CHOP_Output* output, const OP_Inputs* inputs, voi
 	}
 	SpawnDefaults defaults = readSpawnDefaults( inputs );
 
+	if ( myResetPending )
+	{
+		core->removeGroup( myOpId );
+		myGroupRegistered = false;
+		mySopId = 0;
+		mySopCooks = -1;
+		myResetPending = false;
+	}
+
 	uint32_t sopId = spawnSop != nullptr ? spawnSop->opId : 0;
 	int64_t sopCooks = spawnSop != nullptr ? spawnSop->totalCooks : -1;
 
@@ -184,5 +196,21 @@ void Box3DBodiesCHOP::setupParameters( OP_ParameterManager* manager, void* )
 		manager->appendCHOP( p );
 	}
 
+	{
+		OP_NumericParameter p;
+		p.name = ResetName;
+		p.label = "Reset";
+		p.page = "Bodies";
+		manager->appendPulse( p );
+	}
+
 	appendBodyParameters( manager, "Bodies" );
+}
+
+void Box3DBodiesCHOP::pulsePressed( const char* name, void* )
+{
+	if ( std::strcmp( name, ResetName ) == 0 )
+	{
+		myResetPending = true;
+	}
 }

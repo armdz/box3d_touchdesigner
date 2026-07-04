@@ -36,6 +36,7 @@ public:
 	virtual void getWarningString( OP_String* warning, void* reserved1 ) override;
 
 	virtual void setupParameters( OP_ParameterManager* manager, void* reserved1 ) override;
+	virtual void pulsePressed( const char* name, void* reserved1 ) override;
 
 private:
 	void unregisterGroup();
@@ -48,6 +49,7 @@ private:
 	uint32_t mySopId = 0;
 	int64_t mySopCooks = -1;
 	bool myGroupRegistered = false;
+	bool myResetPending = false;
 
 	std::string myWarning;
 };
