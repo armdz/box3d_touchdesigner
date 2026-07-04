@@ -1,7 +1,7 @@
 build/
 plugin/
 tox/
-Backup/
+samples/Backup/
 .vs/
 .vscode/
 .idea/
