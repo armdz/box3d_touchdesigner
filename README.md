@@ -97,6 +97,35 @@ This copies every DLL from `plugin/` to
 `%USERPROFILE%\Documents\Derivative\Plugins`. Reopen TD and the operators appear in the
 OP Create dialog (Custom family).
 
+## Publishing a GitHub release (DLLs)
+
+This repo includes an automated release workflow at `.github/workflows/release.yml`.
+
+How it works:
+
+- Trigger: push a tag that starts with `v` (example: `v0.2.0`).
+- CI builds the project in `Release` on `windows-latest`.
+- CI validates expected outputs in `plugin/`.
+- CI packages DLLs + `install_plugin.bat` + `README.md` into a zip.
+- CI publishes a GitHub Release with the zip and a `.sha256` checksum file.
+
+Recommended command sequence:
+
+```bash
+git add .
+git commit -m "Prepare release v0.2.0"
+git tag v0.2.0
+git push origin main
+git push origin v0.2.0
+```
+
+Resulting release artifact name:
+
+- `box3d-touchdesigner-vX.Y.Z-windows-x64.zip`
+
+If you trigger it manually (`workflow_dispatch`), it still builds and uploads an artifact
+using `manual-<run_number>` as version suffix.
+
 ## Quick start
 
 1. Drop a **Box3D Solver** CHOP and configure world settings (gravity/ground/container/collision).
