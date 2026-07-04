@@ -1,6 +1,7 @@
 build/
 plugin/
 tox/
+Backup/
 .vs/
 .vscode/
 .idea/

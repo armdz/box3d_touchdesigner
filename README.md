@@ -1,9 +1,13 @@
 # Box3D for TouchDesigner
 
+![Preview](preview.gif)
+
 Native TouchDesigner custom operators exposing [Box3D](https://box2d.org) — Erin Catto's
 3D rigid-body physics engine — inside TD, modeled after the workflow of TD's built-in
 Bullet solver: a solver node owns the world, actor nodes contribute bodies, no wiring
 between them.
+
+Current plugin release: **v0.2.1**.
 
 > Agent/contributor context, design decisions and the phase roadmap live in
 > [PLAN.md](PLAN.md) (Spanish). Read it before changing this folder.
@@ -12,9 +16,9 @@ between them.
 
 | Node | Family | Role |
 |---|---|---|
-| **Box3D Solver** (`Box3dsolver`) | CHOP | Owns one world: gravity, sub-steps, optional ground plane, optional static container walls, optional static **Collision SOP** (triangle mesh). Steps the simulation once per frame. It does not spawn bodies; body nodes feed the world. Output channels are compatibility zeros. |
-| **Box3D Body** (`Box3dbody`) | SOP | ONE rigid body. Wire geometry in and pick a shape: **Input Hull** (convex hull of the input points), or Box/Sphere/Capsule. Output is the input geometry transformed by the simulation every frame — wire it straight to a render. Body transform also on its Info CHOP. For rigid upstream SOP animation (Translate/Rotate/Transform SOP), the body follows pose updates without rebuilding the whole world. |
-| **Box3D Instances** (`Box3dinstances`) | CHOP | A group of bodies for instancing: each point of its Spawn SOP spawns one body (per-point attributes below). Outputs `tx ty tz rx ry rz`, one sample per body — feed Geometry COMP instancing (RX/RY/RZ are degrees, TD rotate order XYZ). |
+| **Box3D Solver** (`Box3dsolver`) | CHOP | Owns one world: gravity, sub-steps, optional ground plane, optional static container walls, optional static **Collision SOP** (triangle mesh). Steps the simulation once per frame. It does not spawn bodies; body nodes feed the world. Output channels are compatibility zeros. Includes a **Reset** pulse to force a full world rebuild. |
+| **Box3D Body** (`Box3dbody`) | SOP | ONE rigid body. Wire geometry in and pick a shape: **Input Hull** (convex hull of the input points), or Box/Sphere/Capsule. Output is the input geometry transformed by the simulation every frame — wire it straight to a render. Body transform also on its Info CHOP. For rigid upstream SOP animation (Translate/Rotate/Transform SOP), the body follows pose updates without rebuilding the whole world. Includes a **Reset** pulse to re-register this body cleanly. |
+| **Box3D Instances** (`Box3dinstances`) | CHOP | A group of bodies for instancing: each point of its Spawn SOP spawns one body (per-point attributes below). Outputs `tx ty tz rx ry rz`, one sample per body — feed Geometry COMP instancing (RX/RY/RZ are degrees, TD rotate order XYZ). Includes a **Reset** pulse to re-register this group cleanly. |
 
 Body and Instances nodes bind to a solver through their **Solver** path parameter.
 Reading the solver creates the cook dependency, so TD always steps the world before the
@@ -38,31 +42,7 @@ Notes:
 
 - `size` is interpreted as full extents/diameter, and current defaults are unit-sized (`1,1,1`).
 - Body/Instances updates are automatic. There is no "Reset On Input Change" toggle for body spawn groups.
-
-## Wrapper TOX generation
-
-You can auto-generate basic wrapper `.tox` components from TouchDesigner with:
-
-- Script: `tools/td/generate_tox_wrappers.py`
-- Output folder: `tox/`
-
-How to run:
-
-1. Open a `.toe` located inside this repo (for example `samples/test.toe`).
-2. Create a Text DAT and paste the script contents, or run it from disk.
-3. Run the script (Alt+R in the Text DAT).
-
-Expected output files:
-
-- `tox/Box3D_Solver.tox`
-- `tox/Box3D_Body.tox`
-- `tox/Box3D_Instances.tox`
-
-These wrappers contain preconfigured CPlusPlus operators pointing to the DLLs in
-`plugin/`.
-
-If you run this script while TouchDesigner has an old plugin loaded from a locked path,
-close and reopen TD before exporting/using the wrappers.
+- Use each node's **Reset** pulse when a specific body/group needs a clean rebind without changing SOP inputs.
 
 ## Building (Windows x64)
 
@@ -97,35 +77,6 @@ This copies every DLL from `plugin/` to
 `%USERPROFILE%\Documents\Derivative\Plugins`. Reopen TD and the operators appear in the
 OP Create dialog (Custom family).
 
-## Publishing a GitHub release (DLLs)
-
-This repo includes an automated release workflow at `.github/workflows/release.yml`.
-
-How it works:
-
-- Trigger: push a tag that starts with `v` (example: `v0.2.0`).
-- CI builds the project in `Release` on `windows-latest`.
-- CI validates expected outputs in `plugin/`.
-- CI packages DLLs + `install_plugin.bat` + `README.md` into a zip.
-- CI publishes a GitHub Release with the zip and a `.sha256` checksum file.
-
-Recommended command sequence:
-
-```bash
-git add .
-git commit -m "Prepare release v0.2.0"
-git tag v0.2.0
-git push origin main
-git push origin v0.2.0
-```
-
-Resulting release artifact name:
-
-- `box3d-touchdesigner-vX.Y.Z-windows-x64.zip`
-
-If you trigger it manually (`workflow_dispatch`), it still builds and uploads an artifact
-using `manual-<run_number>` as version suffix.
-
 ## Quick start
 
 1. Drop a **Box3D Solver** CHOP and configure world settings (gravity/ground/container/collision).
@@ -143,6 +94,9 @@ using `manual-<run_number>` as version suffix.
   - incompatible body changes (shape/material/count/hull) recreate only that group.
 - Kinematic bodies are driven with target transforms (not pure teleports), improving
   contacts against dynamic bodies when externally animated.
+- Body and Instances include a local **Reset** pulse, separate from Solver reset.
+- Body SOP preserves shading better when possible by respecting normal attribute sets
+  and avoiding extra normal rotation in rigid input-follow mode.
 
 ## Repo layout
 
