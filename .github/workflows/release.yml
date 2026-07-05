@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 jobs:
-  build-and-release:
+  build-windows:
     runs-on: windows-latest
 
     steps:
@@ -61,10 +61,89 @@ jobs:
           $hash = (Get-FileHash $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  $(Split-Path $zipPath -Leaf)" | Set-Content "release/box3d-touchdesigner-$version-windows-x64.sha256"
 
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-x64
+          path: |
+            release/*.zip
+            release/*.sha256
+
+  build-macos:
+    # Apple Silicon runner; clang on it can still target x86_64 too, so we
+    # build a universal binary usable on both Intel and Apple Silicon Macs.
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure (CMake, universal binary)
+        run: cmake -B build -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+
+      - name: Build (Release)
+        run: cmake --build build --config Release
+
+      - name: Verify expected bundles exist
+        run: |
+          expected=(
+            "plugin/libBox3DCore.dylib"
+            "plugin/Box3DSolverCHOP.plugin/Contents/MacOS/Box3DSolverCHOP"
+            "plugin/Box3DBodySOP.plugin/Contents/MacOS/Box3DBodySOP"
+            "plugin/Box3DBodiesCHOP.plugin/Contents/MacOS/Box3DBodiesCHOP"
+          )
+          missing=0
+          for f in "${expected[@]}"; do
+            if [ ! -e "$f" ]; then
+              echo "::error::Missing build output: $f"
+              missing=1
+            fi
+          done
+          exit $missing
+
+      - name: Package release artifacts
+        run: |
+          version="${{ github.ref_name }}"
+          if [ -z "$version" ] || [ "$version" = "refs/heads/main" ]; then
+            version="manual-${{ github.run_number }}"
+          fi
+
+          packageRoot="release/box3d-touchdesigner-$version-macos-universal"
+          mkdir -p "$packageRoot"
+
+          cp -R plugin/*.plugin "$packageRoot"/
+          cp plugin/libBox3DCore.dylib "$packageRoot"/
+          cp install_plugin.sh "$packageRoot"/
+          cp README.md "$packageRoot"/
+
+          zipName="box3d-touchdesigner-$version-macos-universal.zip"
+          rm -f "release/$zipName"
+          (cd "$packageRoot" && zip -r -X "$GITHUB_WORKSPACE/release/$zipName" . -x ".*")
+
+          (cd release && shasum -a 256 "$zipName") > "release/box3d-touchdesigner-$version-macos-universal.sha256"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-macos-universal
+          path: |
+            release/*.zip
+            release/*.sha256
+
+  release:
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           files: |
-            release/*.zip
-            release/*.sha256
+            release/**/*.zip
+            release/**/*.sha256
