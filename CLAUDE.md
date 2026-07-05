@@ -17,12 +17,14 @@ Fase 5 (joints, fuerzas, kinematic targets).
 Update 2026-07:
 
 - Solver quedó **world-only** (sin spawn/demo propio; su salida CHOP de transform queda en cero por compatibilidad).
-- Se agregó contenedor estático opcional (4 paredes) y parámetro `Workers` para threading de Box3D.
+- Se agregó contenedor estático opcional (4 paredes) y parámetros `Workers`, `External Accel`, `Max Steps / Cook`.
 - `setGroup()` del core hace updates locales: si cambia solo pose, mueve en caliente; si cambia shape/material/count,
   recrea solo ese grupo (sin reset global del mundo).
 - Kinematic updates usan `b3Body_SetTargetTransform(...)` para contactos más estables con dinámicos.
 - Body SOP intenta seguir animación rígida upstream (Transform SOP) sin rebuild global.
-- Defaults de tamaño para spawn/instances en tamaño unitario (`1,1,1`).
+- Instances CHOP ahora publica `sx sy sz` además de `tx ty tz rx ry rz`, con escala saneada para evitar 0/negativos.
+- Spawn SOP acepta aliases de size (`size0..2`, `sizex/y/z`, `sx/y/z`) y `rx/ry/rz` como fallback de orientación inicial.
+- Instances agrega presets de material (`Custom`, `Soft`, `Medium`, `Bouncy`) para defaults rápidos.
 
 Build:
 

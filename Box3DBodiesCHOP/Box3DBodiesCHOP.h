@@ -4,8 +4,9 @@
 // getParCHOP creates the cook dependency, so TD steps the solver first).
 // Bodies come from this node's Spawn SOP (each point = one body, same
 // attribute contract as the solver, see PLAN.md) with this node's defaults.
-// Outputs the transforms of ITS OWN bodies: tx ty tz rx ry rz (degrees, TD
-// rotate order XYZ) — one sample per body, for per-group instancing.
+// Outputs the transforms and sizes of ITS OWN bodies:
+// tx ty tz rx ry rz sx sy sz (degrees for rotation, TD rotate order XYZ) —
+// one sample per body, for per-group instancing.
 
 #pragma once
 
@@ -15,6 +16,7 @@
 #include "TDB3Common.h"
 
 #include <string>
+#include <vector>
 
 using namespace TD;
 
@@ -50,6 +52,7 @@ private:
 	int64_t mySopCooks = -1;
 	bool myGroupRegistered = false;
 	bool myResetPending = false;
+	std::vector<tdb3::SpawnBody> myLastSpawnDefs;
 
 	std::string myWarning;
 };

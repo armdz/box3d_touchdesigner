@@ -12,10 +12,6 @@ namespace
 {
 
 constexpr double kFixedTimeStep = 1.0 / 60.0;
-
-// Cap the number of fixed steps per advance so a long stall (file dialog,
-// heavy cook) doesn't make the solver spiral trying to catch up.
-constexpr int kMaxStepsPerAdvance = 4;
 constexpr int kHullVertexBudget = 32;
 
 struct Group
@@ -233,7 +229,8 @@ struct SolverCore::Impl
 		destroyWorld();
 
 		b3WorldDef worldDef = b3DefaultWorldDef();
-		worldDef.gravity = b3Vec3{ settings.gravityX, settings.gravityY, settings.gravityZ };
+		worldDef.gravity = b3Vec3{ settings.gravityX + settings.accelX, settings.gravityY + settings.accelY,
+								  settings.gravityZ + settings.accelZ };
 		worldDef.workerCount = settings.workerCount > 1 ? settings.workerCount : 1;
 		world = b3CreateWorld( &worldDef );
 
@@ -329,7 +326,9 @@ void SolverCore::setWorldSettings( const WorldSettings& settings )
 
 	if ( B3_IS_NON_NULL( m->world ) && !m->dirty )
 	{
-		b3World_SetGravity( m->world, b3Vec3{ settings.gravityX, settings.gravityY, settings.gravityZ } );
+		b3World_SetGravity( m->world,
+			b3Vec3{ settings.gravityX + settings.accelX, settings.gravityY + settings.accelY,
+					 settings.gravityZ + settings.accelZ } );
 		b3World_SetWorkerCount( m->world, settings.workerCount > 1 ? settings.workerCount : 1 );
 	}
 }
@@ -469,9 +468,10 @@ void SolverCore::advance( double dtSeconds, bool simulate )
 	}
 
 	m->accumulator += dtSeconds;
+	int maxSteps = m->settings.maxStepsPerCook > 0 ? m->settings.maxStepsPerCook : 1;
 
 	int steps = 0;
-	while ( m->accumulator >= kFixedTimeStep && steps < kMaxStepsPerAdvance )
+	while ( m->accumulator >= kFixedTimeStep && steps < maxSteps )
 	{
 		b3World_Step( m->world, (float)kFixedTimeStep, m->settings.subSteps );
 		m->accumulator -= kFixedTimeStep;

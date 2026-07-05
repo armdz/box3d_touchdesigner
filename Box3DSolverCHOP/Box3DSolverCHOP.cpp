@@ -13,7 +13,9 @@ constexpr double kFixedTimeStep = 1.0 / 60.0;
 constexpr char SimulateName[] = "Simulate";
 constexpr char ResetName[] = "Reset";
 constexpr char GravityName[] = "Gravity";
+constexpr char ExternalaccelName[] = "Externalaccel";
 constexpr char SubstepsName[] = "Substeps";
+constexpr char MaxstepspercookName[] = "Maxstepspercook";
 constexpr char WorkersName[] = "Workers";
 constexpr char GroundName[] = "Ground";
 constexpr char GroundsizeName[] = "Groundsize";
@@ -33,6 +35,12 @@ WorldSettings readWorldSettings( const OP_Inputs* inputs )
 	s.gravityY = (float)gy;
 	s.gravityZ = (float)gz;
 
+	double ax, ay, az;
+	inputs->getParDouble3( ExternalaccelName, ax, ay, az );
+	s.accelX = (float)ax;
+	s.accelY = (float)ay;
+	s.accelZ = (float)az;
+
 	s.ground = inputs->getParInt( GroundName ) != 0;
 	s.groundSize = (float)inputs->getParDouble( GroundsizeName );
 	s.container = inputs->getParInt( ContainerName ) != 0;
@@ -40,6 +48,7 @@ WorldSettings readWorldSettings( const OP_Inputs* inputs )
 	s.wallThickness = (float)inputs->getParDouble( WallthicknessName );
 	s.workerCount = inputs->getParInt( WorkersName );
 	s.subSteps = inputs->getParInt( SubstepsName );
+	s.maxStepsPerCook = inputs->getParInt( MaxstepspercookName );
 	return s;
 }
 
@@ -267,6 +276,22 @@ void Box3DSolverCHOP::setupParameters( OP_ParameterManager* manager, void* )
 
 	{
 		OP_NumericParameter p;
+		p.name = ExternalaccelName;
+		p.label = "External Accel";
+		p.page = "Solver";
+		p.defaultValues[0] = 0.0;
+		p.defaultValues[1] = 0.0;
+		p.defaultValues[2] = 0.0;
+		for ( int i = 0; i < 3; ++i )
+		{
+			p.minSliders[i] = -20.0;
+			p.maxSliders[i] = 20.0;
+		}
+		manager->appendXYZ( p );
+	}
+
+	{
+		OP_NumericParameter p;
 		p.name = SubstepsName;
 		p.label = "Sub Steps";
 		p.page = "Solver";
@@ -275,6 +300,21 @@ void Box3DSolverCHOP::setupParameters( OP_ParameterManager* manager, void* )
 		p.maxValues[0] = 16;
 		p.minSliders[0] = 1;
 		p.maxSliders[0] = 8;
+		p.clampMins[0] = true;
+		p.clampMaxes[0] = true;
+		manager->appendInt( p );
+	}
+
+	{
+		OP_NumericParameter p;
+		p.name = MaxstepspercookName;
+		p.label = "Max Steps / Cook";
+		p.page = "Solver";
+		p.defaultValues[0] = 8;
+		p.minValues[0] = 1;
+		p.maxValues[0] = 64;
+		p.minSliders[0] = 1;
+		p.maxSliders[0] = 24;
 		p.clampMins[0] = true;
 		p.clampMaxes[0] = true;
 		manager->appendInt( p );

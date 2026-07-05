@@ -27,6 +27,8 @@ constexpr char ShapeParName[] = "Shape";
 constexpr char SizeParName[] = "Size";
 constexpr char DensityParName[] = "Density";
 constexpr char FrictionParName[] = "Friction";
+constexpr char RestitutionParName[] = "Restitution";
+constexpr char TypeParName[] = "Type";
 
 struct SpawnDefaults
 {
@@ -34,11 +36,13 @@ struct SpawnDefaults
 	float sizeX = 1.0f, sizeY = 1.0f, sizeZ = 1.0f;
 	float density = 1.0f;
 	float friction = 0.6f;
+	float restitution = 0.0f;
+	int type = 2;
 
 	bool operator!=( const SpawnDefaults& o ) const
 	{
 		return shape != o.shape || sizeX != o.sizeX || sizeY != o.sizeY || sizeZ != o.sizeZ || density != o.density ||
-			   friction != o.friction;
+			   friction != o.friction || restitution != o.restitution || type != o.type;
 	}
 };
 
@@ -55,6 +59,8 @@ inline SpawnDefaults readSpawnDefaults( const TD::OP_Inputs* inputs )
 
 	d.density = (float)inputs->getParDouble( DensityParName );
 	d.friction = (float)inputs->getParDouble( FrictionParName );
+	d.restitution = (float)inputs->getParDouble( RestitutionParName );
+	d.type = inputs->getParInt( TypeParName );
 	return d;
 }
 
@@ -121,6 +127,30 @@ inline void appendBodyParameters( TD::OP_ParameterManager* manager, const char* 
 		p.clampMins[0] = true;
 		manager->appendFloat( p );
 	}
+
+	{
+		TD::OP_NumericParameter p;
+		p.name = RestitutionParName;
+		p.label = "Default Restitution";
+		p.page = page;
+		p.defaultValues[0] = 0.0;
+		p.minValues[0] = 0.0;
+		p.minSliders[0] = 0.0;
+		p.maxSliders[0] = 1.0;
+		p.clampMins[0] = true;
+		manager->appendFloat( p );
+	}
+
+	{
+		TD::OP_StringParameter p;
+		p.name = TypeParName;
+		p.label = "Default Type";
+		p.page = page;
+		p.defaultValue = "dynamic";
+		const char* names[] = { "static", "kinematic", "dynamic" };
+		const char* labels[] = { "Static", "Kinematic", "Dynamic" };
+		manager->appendMenu( p, 3, names, labels );
+	}
 }
 
 // Read one component of an optional per-point attribute, falling back to a
@@ -144,6 +174,27 @@ inline float readPointAttr( const TD::SOP_CustomAttribData* a, int point, int co
 	return def;
 }
 
+// Converts Euler XYZ degrees (TD-style RX/RY/RZ) to quaternion x y z w.
+inline void eulerXYZDegreesToQuat( float rxDeg, float ryDeg, float rzDeg, float& qx, float& qy, float& qz, float& qw )
+{
+	constexpr float kDegToRad = 0.01745329251994329577f;
+	float hx = 0.5f * rxDeg * kDegToRad;
+	float hy = 0.5f * ryDeg * kDegToRad;
+	float hz = 0.5f * rzDeg * kDegToRad;
+
+	float cx = cosf( hx );
+	float sx = sinf( hx );
+	float cy = cosf( hy );
+	float sy = sinf( hy );
+	float cz = cosf( hz );
+	float sz = sinf( hz );
+
+	qw = cx * cy * cz + sx * sy * sz;
+	qx = sx * cy * cz - cx * sy * sz;
+	qy = cx * sy * cz + sx * cy * sz;
+	qz = cx * cy * sz - sx * sy * cz;
+}
+
 // Each SOP point becomes one SpawnBody. Per-point attributes (shape, size,
 // density, friction, restitution, type, orient) override the defaults.
 // See PLAN.md for the attribute contract.
@@ -160,11 +211,27 @@ inline std::vector<SpawnBody> parseSpawnSop( const TD::OP_SOPInput* sop, const S
 
 	const TD::SOP_CustomAttribData* shapeAttr = sop->getCustomAttribute( "shape" );
 	const TD::SOP_CustomAttribData* sizeAttr = sop->getCustomAttribute( "size" );
+	const TD::SOP_CustomAttribData* size0Attr = sop->getCustomAttribute( "size0" );
+	const TD::SOP_CustomAttribData* size1Attr = sop->getCustomAttribute( "size1" );
+	const TD::SOP_CustomAttribData* size2Attr = sop->getCustomAttribute( "size2" );
+	const TD::SOP_CustomAttribData* sizeXAttr = sop->getCustomAttribute( "sizex" );
+	const TD::SOP_CustomAttribData* sizeYAttr = sop->getCustomAttribute( "sizey" );
+	const TD::SOP_CustomAttribData* sizeZAttr = sop->getCustomAttribute( "sizez" );
+	const TD::SOP_CustomAttribData* sxAttr = sop->getCustomAttribute( "sx" );
+	const TD::SOP_CustomAttribData* syAttr = sop->getCustomAttribute( "sy" );
+	const TD::SOP_CustomAttribData* szAttr = sop->getCustomAttribute( "sz" );
 	const TD::SOP_CustomAttribData* densityAttr = sop->getCustomAttribute( "density" );
 	const TD::SOP_CustomAttribData* frictionAttr = sop->getCustomAttribute( "friction" );
 	const TD::SOP_CustomAttribData* restitutionAttr = sop->getCustomAttribute( "restitution" );
 	const TD::SOP_CustomAttribData* typeAttr = sop->getCustomAttribute( "type" );
 	const TD::SOP_CustomAttribData* orientAttr = sop->getCustomAttribute( "orient" );
+	const TD::SOP_CustomAttribData* rxAttr = sop->getCustomAttribute( "rx" );
+	const TD::SOP_CustomAttribData* ryAttr = sop->getCustomAttribute( "ry" );
+	const TD::SOP_CustomAttribData* rzAttr = sop->getCustomAttribute( "rz" );
+
+	const bool hasSplitSize = size0Attr != nullptr || size1Attr != nullptr || size2Attr != nullptr ||
+							 sizeXAttr != nullptr || sizeYAttr != nullptr || sizeZAttr != nullptr ||
+							 sxAttr != nullptr || syAttr != nullptr || szAttr != nullptr;
 
 	defs.reserve( pointCount );
 	for ( int i = 0; i < pointCount; ++i )
@@ -181,15 +248,40 @@ inline std::vector<SpawnBody> parseSpawnSop( const TD::OP_SOPInput* sop, const S
 			d.qz = readPointAttr( orientAttr, i, 2, 0.0f );
 			d.qw = readPointAttr( orientAttr, i, 3, 1.0f );
 		}
+		else if ( rxAttr != nullptr || ryAttr != nullptr || rzAttr != nullptr )
+		{
+			float rx = readPointAttr( rxAttr, i, 0, 0.0f );
+			float ry = readPointAttr( ryAttr, i, 0, 0.0f );
+			float rz = readPointAttr( rzAttr, i, 0, 0.0f );
+			eulerXYZDegreesToQuat( rx, ry, rz, d.qx, d.qy, d.qz, d.qw );
+		}
 
 		d.shape = (int)readPointAttr( shapeAttr, i, 0, (float)defaults.shape );
-		d.sizeX = readPointAttr( sizeAttr, i, 0, defaults.sizeX );
-		d.sizeY = readPointAttr( sizeAttr, i, 1, sizeAttr != nullptr ? d.sizeX : defaults.sizeY );
-		d.sizeZ = readPointAttr( sizeAttr, i, 2, sizeAttr != nullptr ? d.sizeX : defaults.sizeZ );
+		if ( sizeAttr != nullptr )
+		{
+			d.sizeX = readPointAttr( sizeAttr, i, 0, defaults.sizeX );
+			d.sizeY = readPointAttr( sizeAttr, i, 1, d.sizeX );
+			d.sizeZ = readPointAttr( sizeAttr, i, 2, d.sizeX );
+		}
+		else if ( hasSplitSize )
+		{
+			d.sizeX = readPointAttr( size0Attr, i, 0,
+									readPointAttr( sizeXAttr, i, 0, readPointAttr( sxAttr, i, 0, defaults.sizeX ) ) );
+			d.sizeY = readPointAttr( size1Attr, i, 0,
+									readPointAttr( sizeYAttr, i, 0, readPointAttr( syAttr, i, 0, d.sizeX ) ) );
+			d.sizeZ = readPointAttr( size2Attr, i, 0,
+									readPointAttr( sizeZAttr, i, 0, readPointAttr( szAttr, i, 0, d.sizeX ) ) );
+		}
+		else
+		{
+			d.sizeX = defaults.sizeX;
+			d.sizeY = defaults.sizeY;
+			d.sizeZ = defaults.sizeZ;
+		}
 		d.density = readPointAttr( densityAttr, i, 0, defaults.density );
 		d.friction = readPointAttr( frictionAttr, i, 0, defaults.friction );
-		d.restitution = readPointAttr( restitutionAttr, i, 0, 0.0f );
-		d.type = (int)readPointAttr( typeAttr, i, 0, 2.0f );
+		d.restitution = readPointAttr( restitutionAttr, i, 0, defaults.restitution );
+		d.type = (int)readPointAttr( typeAttr, i, 0, (float)defaults.type );
 
 		defs.push_back( d );
 	}

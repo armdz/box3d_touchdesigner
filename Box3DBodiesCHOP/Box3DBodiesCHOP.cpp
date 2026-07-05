@@ -1,5 +1,6 @@
 #include "Box3DBodiesCHOP.h"
 
+#include <cmath>
 #include <cstring>
 
 using namespace tdb3;
@@ -9,6 +10,61 @@ namespace
 
 constexpr char SolverName[] = "Solver";
 constexpr char ResetName[] = "Reset";
+constexpr char MaterialpresetName[] = "Materialpreset";
+constexpr int kInstancesNumOutputChannels = 9;
+constexpr const char* kInstancesOutputChannelNames[kInstancesNumOutputChannels] = { "tx", "ty", "tz", "rx", "ry",
+																   "rz", "sx", "sy", "sz" };
+
+void applyMaterialPreset( int preset, SpawnDefaults& defaults )
+{
+	switch ( preset )
+	{
+		case 1: // Soft
+			defaults.density = 1.0f;
+			defaults.friction = 0.85f;
+			defaults.restitution = 0.05f;
+			break;
+		case 2: // Medium
+			defaults.density = 1.0f;
+			defaults.friction = 0.6f;
+			defaults.restitution = 0.3f;
+			break;
+		case 3: // Bouncy
+			defaults.density = 1.0f;
+			defaults.friction = 0.2f;
+			defaults.restitution = 0.85f;
+			break;
+		default: // Custom
+			break;
+	}
+}
+
+void writeScaleChannels( CHOP_Output* output, const std::vector<SpawnBody>& defs )
+{
+	constexpr float kMinRenderScale = 0.001f;
+	auto sanitizeScale = [&]( float v ) {
+		float s = fabsf( v );
+		return s >= kMinRenderScale ? s : kMinRenderScale;
+	};
+
+	for ( int i = 0; i < output->numSamples; ++i )
+	{
+		float sx = 1.0f;
+		float sy = 1.0f;
+		float sz = 1.0f;
+
+		if ( i < (int)defs.size() )
+		{
+			sx = sanitizeScale( defs[i].sizeX );
+			sy = sanitizeScale( defs[i].sizeY );
+			sz = sanitizeScale( defs[i].sizeZ );
+		}
+
+		output->channels[6][i] = sx;
+		output->channels[7][i] = sy;
+		output->channels[8][i] = sz;
+	}
+}
 
 } // namespace
 
@@ -80,7 +136,7 @@ bool Box3DBodiesCHOP::getOutputInfo( CHOP_OutputInfo* info, const OP_Inputs* inp
 	const OP_SOPInput* sop = inputs->getParSOP( SpawnsopParName );
 	int sampleCount = sop != nullptr ? sop->getNumPoints() : 0;
 
-	info->numChannels = kNumOutputChannels;
+	info->numChannels = kInstancesNumOutputChannels;
 	info->numSamples = sampleCount > 0 ? sampleCount : 1;
 	info->startIndex = 0;
 	return true;
@@ -88,7 +144,7 @@ bool Box3DBodiesCHOP::getOutputInfo( CHOP_OutputInfo* info, const OP_Inputs* inp
 
 void Box3DBodiesCHOP::getChannelName( int32_t index, OP_String* name, const OP_Inputs*, void* )
 {
-	name->setString( kOutputChannelNames[index] );
+	name->setString( kInstancesOutputChannelNames[index] );
 }
 
 void Box3DBodiesCHOP::execute( CHOP_Output* output, const OP_Inputs* inputs, void* )
@@ -105,7 +161,9 @@ void Box3DBodiesCHOP::execute( CHOP_Output* output, const OP_Inputs* inputs, voi
 		myWarning = "Set the Solver parameter to a Box3D Solver CHOP.";
 		unregisterGroup();
 		mySolverOpId = 0;
+		myLastSpawnDefs.clear();
 		writeTransformChannels( output, nullptr, myOpId );
+		writeScaleChannels( output, myLastSpawnDefs );
 		return;
 	}
 
@@ -116,7 +174,9 @@ void Box3DBodiesCHOP::execute( CHOP_Output* output, const OP_Inputs* inputs, voi
 		myWarning = "The Solver parameter does not point to a Box3D Solver CHOP.";
 		unregisterGroup();
 		mySolverOpId = 0;
+		myLastSpawnDefs.clear();
 		writeTransformChannels( output, nullptr, myOpId );
+		writeScaleChannels( output, myLastSpawnDefs );
 		return;
 	}
 
@@ -127,11 +187,13 @@ void Box3DBodiesCHOP::execute( CHOP_Output* output, const OP_Inputs* inputs, voi
 		mySolverOpId = solverOpId;
 	}
 	SpawnDefaults defaults = readSpawnDefaults( inputs );
+	applyMaterialPreset( inputs->getParInt( MaterialpresetName ), defaults );
 
 	if ( myResetPending )
 	{
 		core->removeGroup( myOpId );
 		myGroupRegistered = false;
+		myLastSpawnDefs.clear();
 		mySopId = 0;
 		mySopCooks = -1;
 		myResetPending = false;
@@ -145,7 +207,8 @@ void Box3DBodiesCHOP::execute( CHOP_Output* output, const OP_Inputs* inputs, voi
 
 	if ( groupChanged )
 	{
-		core->setGroup( myOpId, parseSpawnSop( spawnSop, defaults ) );
+		myLastSpawnDefs = parseSpawnSop( spawnSop, defaults );
+		core->setGroup( myOpId, myLastSpawnDefs );
 		myGroupRegistered = true;
 		myLastDefaults = defaults;
 		mySopId = sopId;
@@ -161,6 +224,7 @@ void Box3DBodiesCHOP::execute( CHOP_Output* output, const OP_Inputs* inputs, voi
 	// A freshly registered group is reported at its spawn poses until the
 	// solver rebuilds the world on its next cook (one frame of latency).
 	writeTransformChannels( output, core, myOpId );
+	writeScaleChannels( output, myLastSpawnDefs );
 }
 
 int32_t Box3DBodiesCHOP::getNumInfoCHOPChans( void* )
@@ -202,6 +266,17 @@ void Box3DBodiesCHOP::setupParameters( OP_ParameterManager* manager, void* )
 		p.label = "Reset";
 		p.page = "Bodies";
 		manager->appendPulse( p );
+	}
+
+	{
+		OP_StringParameter p;
+		p.name = MaterialpresetName;
+		p.label = "Material Preset";
+		p.page = "Bodies";
+		p.defaultValue = "custom";
+		const char* names[] = { "custom", "soft", "medium", "bouncy" };
+		const char* labels[] = { "Custom", "Soft", "Medium", "Bouncy" };
+		manager->appendMenu( p, 4, names, labels );
 	}
 
 	appendBodyParameters( manager, "Bodies" );

@@ -51,6 +51,7 @@ struct BodyTransform
 struct WorldSettings
 {
 	float gravityX = 0.0f, gravityY = -10.0f, gravityZ = 0.0f;
+	float accelX = 0.0f, accelY = 0.0f, accelZ = 0.0f;
 	bool ground = true;
 	float groundSize = 20.0f;
 	bool container = false;
@@ -58,6 +59,7 @@ struct WorldSettings
 	float wallThickness = 0.25f;
 	int workerCount = 1;
 	int subSteps = 4;
+	int maxStepsPerCook = 8;
 };
 
 class BOX3DTD_API SolverCore

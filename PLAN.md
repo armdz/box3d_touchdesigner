@@ -10,14 +10,16 @@ Usar este bloque como fuente de verdad rápida:
 - **Solver world-only**: ya no hace spawn/demo propio ni entrega transforms de actores.
   Los cuerpos los aportan `Box3dbody` y `Box3dinstances`.
 - **Mundo**: gravedad/substeps, piso opcional, contenedor estático opcional (4 paredes), Collision SOP estática,
-  y parámetro `Workers` para workerCount de Box3D.
+  y parámetros `Workers`, `External Accel`, `Max Steps / Cook`.
 - **Actualización de grupos**:
   - pose-only: update en caliente,
   - cambios incompatibles (shape/material/count/hull): recreate local del grupo,
   - evitar reset global del mundo salvo cambios de world/collision mesh.
 - **Kinematic**: updates de pose con `b3Body_SetTargetTransform(...)` para colisiones más estables con dinámicos.
 - **Body SOP**: seguimiento de animación rígida upstream para minimizar rebuild global; mantiene salida SOP transformada.
-- **Defaults de spawn/instances**: tamaño unitario (`1,1,1`).
+- **Instances CHOP**: salida `tx ty tz rx ry rz sx sy sz` (escala saneada para evitar 0/negativos en render).
+- **Defaults de spawn/instances**: tamaño unitario (`1,1,1`), más defaults de `restitution` y `type`.
+- **Material presets (Instances)**: `Custom`, `Soft`, `Medium`, `Bouncy` para fallback rápido de material.
 
 ## Objetivo
 
@@ -128,15 +130,20 @@ int); si faltan, se usan los parámetros de la página Bodies del nodo:
 |---|---|---|
 | `shape` | 1 | 0=box, 1=sphere, 2=capsule |
 | `size` | 1-3 | tamaños TOTALES; box: x,y,z · sphere: x=diámetro · capsule: x=diámetro, y=alto total (eje Y) |
+| `size0/size1/size2` | 1 c/u | alias de tamaño split |
+| `sizex/sizey/sizez` | 1 c/u | alias de tamaño split |
+| `sx/sy/sz` | 1 c/u | alias de tamaño split |
 | `density` | 1 | densidad de masa |
 | `friction` | 1 | fricción Coulomb |
 | `restitution` | 1 | rebote |
 | `type` | 1 | 0=static, 1=kinematic, 2=dynamic (default) |
 | `orient` | 4 | cuaternión inicial x y z w |
+| `rx/ry/rz` | 1 c/u | rotación inicial en grados (fallback cuando no hay `orient`) |
 
-Si `size` existe pero con menos de 3 componentes, y/z heredan de x. Sin Spawn SOP el nodo
-cae al modo demo (grilla de cajas, params "Demo *"). Cambios en el SOP re-crean el mundo si
-"Reset On Input Change" está activo (detección por `opId` + `totalCooks`).
+Si `size` existe pero con menos de 3 componentes, y/z heredan de x. Si no existe `size`,
+se aceptan aliases split (`size0..2`, `sizex/y/z`, `sx/y/z`) con la misma herencia.
+Sin Spawn SOP el nodo cae al modo demo (grilla de cajas, params "Demo *"). Cambios en el SOP
+re-crean el mundo si "Reset On Input Change" está activo (detección por `opId` + `totalCooks`).
 
 ## Plan por fases
 

@@ -29,7 +29,7 @@ After installing the DLLs, open TouchDesigner and check the example scene in
 |---|---|---|
 | **Box3D Solver** (`Box3dsolver`) | CHOP | Owns one world: gravity, sub-steps, optional ground plane, optional static container walls, optional static **Collision SOP** (triangle mesh). Steps the simulation once per frame. It does not spawn bodies; body nodes feed the world. Output channels are compatibility zeros. Includes a **Reset** pulse to force a full world rebuild. |
 | **Box3D Body** (`Box3dbody`) | SOP | ONE rigid body. Wire geometry in and pick a shape: **Input Hull** (convex hull of the input points), or Box/Sphere/Capsule. Output is the input geometry transformed by the simulation every frame — wire it straight to a render. Body transform also on its Info CHOP. For rigid upstream SOP animation (Translate/Rotate/Transform SOP), the body follows pose updates without rebuilding the whole world. Includes a **Reset** pulse to re-register this body cleanly. |
-| **Box3D Instances** (`Box3dinstances`) | CHOP | A group of bodies for instancing: each point of its Spawn SOP spawns one body (per-point attributes below). Outputs `tx ty tz rx ry rz`, one sample per body — feed Geometry COMP instancing (RX/RY/RZ are degrees, TD rotate order XYZ). Includes a **Reset** pulse to re-register this group cleanly. |
+| **Box3D Instances** (`Box3dinstances`) | CHOP | A group of bodies for instancing: each point of its Spawn SOP spawns one body (per-point attributes below). Outputs `tx ty tz rx ry rz sx sy sz`, one sample per body — feed Geometry COMP instancing (RX/RY/RZ are degrees, TD rotate order XYZ; SX/SY/SZ are always positive, with a small safety clamp to avoid degenerate render scales). Includes a **Reset** pulse to re-register this group cleanly. |
 
 Body and Instances nodes bind to a solver through their **Solver** path parameter.
 Reading the solver creates the cook dependency, so TD always steps the world before the
@@ -41,11 +41,15 @@ actors cook — no wires needed. All groups interact in the same world.
 |---|---|---|
 | `shape` | 1 | 0=box, 1=sphere, 2=capsule |
 | `size` | 1–3 | FULL sizes; box: x,y,z · sphere: x=diameter · capsule: x=diameter, y=total height (Y axis) |
+| `size0/size1/size2` | 1 each | Alias form for split size components |
+| `sizex/sizey/sizez` | 1 each | Alias form for split size components |
+| `sx/sy/sz` | 1 each | Alias form for split size components |
 | `density` | 1 | mass density |
 | `friction` | 1 | Coulomb friction |
 | `restitution` | 1 | bounciness |
 | `type` | 1 | 0=static, 1=kinematic, 2=dynamic (default) |
 | `orient` | 4 | initial rotation quaternion x y z w |
+| `rx/ry/rz` | 1 each | initial rotation in degrees (used when `orient` is missing) |
 
 Missing attributes fall back to the node's default parameters.
 
@@ -91,19 +95,21 @@ ready-to-run example setup.
 
 ## Quick start
 
-1. Drop a **Box3D Solver** CHOP and configure world settings (gravity/ground/container/collision).
+1. Drop a **Box3D Solver** CHOP and configure world settings (gravity/external accel/sub-steps/max steps per cook/ground/container/collision).
 2. Drop a Box SOP, deform it, wire it into a **Box3D Body** SOP, set its Solver parameter
    to the solver node, Shape = Input Hull, and wire the Body to a Geometry COMP. Play.
 3. For crowds: make a Grid SOP, point a **Box3D Instances** CHOP at it (Spawn SOP) and at
-   the solver, then instance a Geometry COMP from its channels
-   (TX/TY/TZ ← `tx ty tz`, RX/RY/RZ ← `rx ry rz`).
+  the solver, then instance a Geometry COMP from its channels
+  (TX/TY/TZ ← `tx ty tz`, RX/RY/RZ ← `rx ry rz`, SX/SY/SZ ← `sx sy sz`).
 
 ## Behavior updates
 
 - Solver is world-only: no solver-owned demo spawn, no solver-owned actor output.
+- Solver exposes `External Accel` and `Max Steps / Cook` for extra control over force fields and catch-up precision.
 - Group updates are local when possible:
   - pose-only updates move existing bodies in-place,
   - incompatible body changes (shape/material/count/hull) recreate only that group.
+- Instances can use a material preset (`Custom`, `Soft`, `Medium`, `Bouncy`) to quickly set default density/friction/restitution.
 - Kinematic bodies are driven with target transforms (not pure teleports), improving
   contacts against dynamic bodies when externally animated.
 - Body and Instances include a local **Reset** pulse, separate from Solver reset.
@@ -134,14 +140,16 @@ repo root
   DLLs must use the dynamic runtime (`/MD`). That is why this project adds box3d's
   `src/` directory directly and never includes box3d's root CMakeLists.
 - **Fixed timestep**: the world steps at a fixed 60 Hz with an accumulator over TD's cook
-  delta (max 4 steps per cook), as Box3D recommends.
+  delta; `Max Steps / Cook` caps catch-up work to avoid spirals while still allowing better
+  collision robustness under load.
 - **Mesh lifetime**: Box3D references (does not copy) collision mesh data; the core keeps
   it alive and destroys it only after the world.
 - Simulation is CPU (Box3D). The Solver `Workers` parameter maps to Box3D worker count.
 
 ## Performance tips
 
-- Start with `Sub Steps = 2..4` and increase only if needed.
+- Start with `Sub Steps = 4..8`, then increase only if needed.
+- Raise `Max Steps / Cook` when fast bodies tunnel during frame drops or heavy scenes.
 - Increase `Workers` on CPUs with real performance cores for collision-heavy scenes.
 - For large crowds, prefer primitive colliders (box/sphere/capsule) over dense hulls.
 
