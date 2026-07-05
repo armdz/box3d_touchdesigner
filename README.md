@@ -9,6 +9,17 @@ between them.
 
 Current plugin release: **v0.2.1**.
 
+## Quick DLL install (GitHub Release)
+
+If you only want to use the plugin, download the latest DLL package from
+[GitHub Releases](https://github.com/armdz/box3d_touchdesigner/releases), extract it,
+and copy the DLLs to:
+
+`%USERPROFILE%\Documents\Derivative\Plugins`
+
+After installing the DLLs, open TouchDesigner and check the example scene in
+`TD-Examples/Sample.toe`.
+
 > Agent/contributor context, design decisions and the phase roadmap live in
 > [PLAN.md](PLAN.md) (Spanish). Read it before changing this folder.
 
@@ -75,7 +86,8 @@ install_plugin.bat
 
 This copies every DLL from `plugin/` to
 `%USERPROFILE%\Documents\Derivative\Plugins`. Reopen TD and the operators appear in the
-OP Create dialog (Custom family).
+OP Create dialog (Custom family). You can then open `TD-Examples/Sample.toe` to see a
+ready-to-run example setup.
 
 ## Quick start
 
@@ -111,6 +123,7 @@ repo root
   Box3DBodiesCHOP/       instances operator
   sdk/                   TouchDesigner CPlusPlus SDK headers (Derivative Shared Use License)
   install_plugin.bat     copies built DLLs into the TD Plugins folder
+  TD-Examples/           TouchDesigner example files (Sample.toe)
   build/                 CMake build dir (gitignored)
   plugin/                built DLLs (gitignored)
 ```
