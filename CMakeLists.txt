@@ -20,7 +20,7 @@ endif()
 
 # VERSION matters: box3d's src/CMakeLists.txt reads PROJECT_VERSION from the
 # enclosing project. Keep it in sync with the box3d version being built.
-project(box3d_touchdesigner VERSION 0.2.3 LANGUAGES C CXX)
+project(box3d_touchdesigner VERSION 0.2.5 LANGUAGES C CXX)
 
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 
