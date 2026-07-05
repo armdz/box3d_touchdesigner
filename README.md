@@ -7,7 +7,7 @@ Native TouchDesigner custom operators exposing [Box3D](https://box2d.org) — Er
 Bullet solver: a solver node owns the world, actor nodes contribute bodies, no wiring
 between them.
 
-Current plugin release: **v0.2.1**.
+Current plugin release: **v0.2.3**.
 
 ## Quick DLL install (GitHub Release)
 
