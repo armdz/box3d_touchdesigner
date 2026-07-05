@@ -15,10 +15,14 @@
 #include <cstdint>
 #include <vector>
 
-#if defined( BOX3DTD_BUILD )
-#define BOX3DTD_API __declspec( dllexport )
+#if defined( _WIN32 )
+	#if defined( BOX3DTD_BUILD )
+	#define BOX3DTD_API __declspec( dllexport )
+	#else
+	#define BOX3DTD_API __declspec( dllimport )
+	#endif
 #else
-#define BOX3DTD_API __declspec( dllimport )
+#define BOX3DTD_API __attribute__( ( visibility( "default" ) ) )
 #endif
 
 namespace tdb3

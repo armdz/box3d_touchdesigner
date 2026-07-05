@@ -1,7 +1,8 @@
 # box3d-touchdesigner
 
-Operadores nativos de TouchDesigner (C++ custom operators, Windows x64) que exponen el
-motor de física **Box3D** de Erin Catto dentro de TD, con UX estilo Bullet Solver.
+Operadores nativos de TouchDesigner (C++ custom operators, Windows x64 y macOS
+arm64/x86_64) que exponen el motor de física **Box3D** de Erin Catto dentro de TD, con UX
+estilo Bullet Solver.
 
 **Leer `PLAN.md` antes de trabajar acá**: tiene el contexto completo, las decisiones de
 arquitectura (por qué CHOP y no POP, composición sin cables vía registro global, el split
@@ -34,9 +35,14 @@ cmake --build build --config Release
 ```
 
 box3d se resuelve solo: usa `../box3d` si existe, si no FetchContent pineado
-(`BOX3D_GIT_TAG`). Instalar: cerrar TD y correr `install_plugin.bat`.
+(`BOX3D_GIT_TAG`). Instalar: cerrar TD y correr `install_plugin.bat` (Windows) o
+`install_plugin.sh` (macOS).
 
 Gotchas clave: box3d root CMake fuerza /MT y los plugins TD necesitan /MD (por eso se
 agrega `box3d/src` directo, nunca su CMakeLists raíz); un operador custom por DLL (límite
 de TD); timestep fijo 60 Hz con acumulador; las mallas de colisión son referenciadas (no
-copiadas) por box3d — el core maneja el lifetime.
+copiadas) por box3d — el core maneja el lifetime. En macOS: `Box3DTDCore.h` exporta con
+`__attribute__((visibility("default")))` en vez de `__declspec`; los bundles `.plugin`
+enlazan `libBox3DCore.dylib` con rpath `@loader_path/../../../` (no el patrón
+Contents/Frameworks de Derivative — ver PLAN.md, rompería el registro compartido);
+`CMAKE_OSX_DEPLOYMENT_TARGET` fijo en 13.0. Detalle completo en PLAN.md.

@@ -80,18 +80,57 @@ Output goes to `plugin/`:
 - `Box3DSolverCHOP.dll`, `Box3DBodySOP.dll`, `Box3DBodiesCHOP.dll` — one custom operator
   per DLL (a TouchDesigner constraint).
 
+## Building (macOS, arm64/x86_64)
+
+Requirements: Xcode Command Line Tools (`clang`), CMake ≥ 3.22, git.
+
+```
+cmake -B build
+cmake --build build --config Release
+```
+
+Same box3d source resolution as Windows (`../box3d` sibling checkout, `BOX3D_GIT_TAG`
+fetch, or `-DBOX3D_SOURCE_DIR=<path>`). The deployment target defaults to macOS 13.0 to
+match TouchDesigner's own minimum. For a universal (Intel + Apple Silicon) build, add
+`-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"`.
+
+Output goes to `plugin/`:
+
+- `libBox3DCore.dylib` — shared core, equivalent to `Box3DCore.dll` above. Must sit next
+  to the plugin bundles: they load it through an `@loader_path`-relative rpath so all
+  three operators share one loaded instance (and therefore one world registry) instead
+  of three isolated copies.
+- `Box3DSolverCHOP.plugin`, `Box3DBodySOP.plugin`, `Box3DBodiesCHOP.plugin` — one custom
+  operator bundle each.
+
 ## Installing
 
-Close TouchDesigner (it locks loaded DLLs), then run:
+**Windows**: close TouchDesigner (it locks loaded DLLs), then run:
 
 ```
 install_plugin.bat
 ```
 
 This copies every DLL from `plugin/` to
-`%USERPROFILE%\Documents\Derivative\Plugins`. Reopen TD and the operators appear in the
-OP Create dialog (Custom family). You can then open `TD-Examples/Sample.toe` to see a
-ready-to-run example setup.
+`%USERPROFILE%\Documents\Derivative\Plugins`.
+
+**macOS**: close TouchDesigner, then run:
+
+```
+./install_plugin.sh
+```
+
+This copies the `.plugin` bundles and `libBox3DCore.dylib` from `plugin/` to
+`~/Library/Application Support/Derivative/TouchDesigner099/Plugins` (that folder name is
+correct as shipped by Derivative — it isn't tied to the TD version you have installed).
+On first load TD will ask you to confirm loading each new/changed binary; this is normal
+for any Custom OP. If you plan to distribute a prebuilt macOS package instead of building
+locally, note that a downloaded (quarantined) unsigned bundle will trigger a Gatekeeper
+warning — codesigning/notarizing is out of scope here but something to add before a
+public macOS release.
+
+Reopen TD and the operators appear in the OP Create dialog (Custom family). You can then
+open `TD-Examples/Sample.toe` to see a ready-to-run example setup.
 
 ## Quick start
 
@@ -128,10 +167,11 @@ repo root
   Box3DBodySOP/          single-body operator
   Box3DBodiesCHOP/       instances operator
   sdk/                   TouchDesigner CPlusPlus SDK headers (Derivative Shared Use License)
-  install_plugin.bat     copies built DLLs into the TD Plugins folder
+  install_plugin.bat     Windows: copies built DLLs into the TD Plugins folder
+  install_plugin.sh      macOS: copies built .plugin bundles + dylib into the TD Plugins folder
   TD-Examples/           TouchDesigner example files (Sample.toe)
   build/                 CMake build dir (gitignored)
-  plugin/                built DLLs (gitignored)
+  plugin/                built plugin binaries (gitignored)
 ```
 
 ## Build notes / gotchas
@@ -139,6 +179,18 @@ repo root
 - **MSVC runtime**: box3d's own root CMake forces the static runtime (`/MT`); TD plugin
   DLLs must use the dynamic runtime (`/MD`). That is why this project adds box3d's
   `src/` directory directly and never includes box3d's root CMakeLists.
+- **macOS rpath**: the operator bundles link `libBox3DCore.dylib` with an
+  `@loader_path/../../../` rpath (set via `INSTALL_RPATH` + `BUILD_WITH_INSTALL_RPATH` in
+  `CMakeLists.txt`), not the more common `@loader_path/../Frameworks` + embedded-per-bundle
+  pattern from Derivative's own docs. That per-bundle pattern would give each of the three
+  `.plugin` bundles its own private copy of the dylib — three separate loaded images with
+  three separate world registries, breaking the whole point of the shared core. The rpath
+  used here resolves to one shared file next to the bundles, exactly like `Box3DCore.dll`
+  next to the plugin DLLs on Windows.
+- **macOS deployment target**: pinned to `13.0` in `CMakeLists.txt` (matches TD's own
+  binary) instead of inheriting whatever newer SDK a local Xcode/CLT install defaults to,
+  which would otherwise make the plugin refuse to load on older-but-still-supported macOS
+  versions.
 - **Fixed timestep**: the world steps at a fixed 60 Hz with an accumulator over TD's cook
   delta; `Max Steps / Cook` caps catch-up work to avoid spirals while still allowing better
   collision robustness under load.
