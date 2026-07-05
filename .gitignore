@@ -7,7 +7,9 @@ samples/
 .idea/
 .cache/
 .claude/
+tools/local/
 CMakeUserPresets.json
 imgui.ini
 .DS_Store
 Thumbs.db
+11
