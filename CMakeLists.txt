@@ -1,5 +1,13 @@
 cmake_minimum_required(VERSION 3.22)
 
+# Match TouchDesigner's own minimum macOS version (its main binary reports
+# minos 13.0) instead of inheriting whatever SDK the local Xcode/CLT ships,
+# which can be much newer and would make the plugin refuse to load on the
+# older macOS versions TD itself still supports. Must be set before project().
+if (APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+	set(CMAKE_OSX_DEPLOYMENT_TARGET "13.0" CACHE STRING "Minimum macOS deployment version")
+endif()
+
 # Box3D for TouchDesigner — standalone plugin project.
 #
 # Box3D itself is pulled from source and its src/ directory is added DIRECTLY,
@@ -90,6 +98,13 @@ function(add_td_plugin OPNAME)
 	)
 	if (APPLE)
 		set_target_properties(${OPNAME} PROPERTIES BUNDLE TRUE BUNDLE_EXTENSION "plugin")
+		# Bake a loader-relative rpath instead of the build tree's absolute path,
+		# so libBox3DCore.dylib is still found after the .plugin bundle is copied
+		# into TD's Plugins folder (it ships as a sibling file next to the bundles).
+		set_target_properties(${OPNAME} PROPERTIES
+			BUILD_WITH_INSTALL_RPATH TRUE
+			INSTALL_RPATH "@loader_path/../../../"
+		)
 	endif()
 
 	target_include_directories(${OPNAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/sdk)

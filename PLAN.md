@@ -90,6 +90,37 @@ Los headers del SDK usados por nuestro plugin están copiados en `sdk/`
   (`b3SetLengthUnitsPerMeter` si hiciera falta otra escala).
 - Hasta 128 mundos independientes por proceso.
 
+## Gotcha de build #0: soporte macOS (2026-07)
+
+El proyecto compila también en macOS (arm64/x86_64, universal opcional con
+`-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"`). Puntos verificados en este entorno (build real
+con clang, no solo lectura de código):
+
+- `common/Box3DTDCore.h` usaba `__declspec(dllexport/dllimport)` sin guardia `_WIN32` — no
+  compila con clang fuera de Windows. Fix: macro cross-platform, `__attribute__((visibility("default")))`
+  en no-Windows.
+- Los operadores son bundles `.plugin` (`BUNDLE TRUE`, `BUNDLE_EXTENSION "plugin"`, ya
+  estaba en el CMakeLists). Cada bundle enlaza `libBox3DCore.dylib` vía `@rpath`.
+- **rpath**: el patrón "oficial" de Derivative (embeber la dylib en
+  `Contents/Frameworks/` de cada bundle + `@loader_path/../Frameworks`) NO sirve acá:
+  cada bundle tendría su PROPIA copia de la dylib → 3 imágenes cargadas distintas → 3
+  `Registry` estáticos distintos → se rompe el registro global compartido entre Solver/
+  Body/Instances (la razón de ser de `Box3DCore`). Se usa en cambio
+  `INSTALL_RPATH "@loader_path/../../../"` + `BUILD_WITH_INSTALL_RPATH TRUE` para que los
+  3 bundles y `libBox3DCore.dylib` compartan una sola carpeta (igual que `Box3DCore.dll`
+  al lado de los plugins en Windows) y dyld cargue una única instancia.
+- **Deployment target**: sin fijar, un Xcode/CLT nuevo compila con el SDK más reciente
+  (visto: minos 26.0) y el binario de TD instalado reporta minos 13.0 — un plugin más
+  nuevo que TD no cargaría en macOS viejos que TD sigue soportando. Fijado
+  `CMAKE_OSX_DEPLOYMENT_TARGET "13.0"` antes del `project()`.
+- Carpeta de instalación real (confirmada leyendo la doc offline embebida en
+  `TouchDesigner.app/Contents/Resources/tfs/.../Custom_Operators.htm`, y el string
+  literal `/Derivative/TouchDesigner099` dentro de `libUT.dylib`):
+  `~/Library/Application Support/Derivative/TouchDesigner099/Plugins` — el `099` es fijo,
+  no depende de la versión de TD instalada. `install_plugin.sh` la usa.
+- box3d ya resuelve SIMD portable en arm64 (fallback fuera de x86 SSE2) sin cambios de
+  nuestra parte; compiló limpio en Apple Silicon nativo y en build universal.
+
 ## Gotcha de build #1: runtime de MSVC
 
 El `CMakeLists.txt` raíz de box3d fuerza runtime **estático** (`/MT`,
