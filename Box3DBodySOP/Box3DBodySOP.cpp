@@ -17,12 +17,21 @@ constexpr char ResetName[] = "Reset";
 constexpr char ShapeName[] = "Shape";
 constexpr char SizeName[] = "Size";
 constexpr char PositionName[] = "Position";
+constexpr char JointName[] = "Joint";
+constexpr char JointpivotName[] = "Jointpivot";
+constexpr char ShowjointpivotName[] = "Showjointpivot";
+constexpr char JointenabledAttrName[] = "joint_enabled";
+constexpr char JointpivotAttrName[] = "joint_pivot";
+constexpr char JointpivotspaceAttrName[] = "joint_pivot_space";
+constexpr char JointrefAttrName[] = "joint_ref";
+constexpr char JointrefwAttrName[] = "joint_ref_w";
 constexpr char TypeName[] = "Type";
+constexpr char BulletccdName[] = "Bulletccd";
 constexpr char DensityName[] = "Density";
 constexpr char FrictionName[] = "Friction";
 constexpr char RestitutionName[] = "Restitution";
 
-// Menu index (input hull, box, sphere, capsule) → core SpawnBody::shape
+// Menu index (input hull, box, sphere, capsule, mesh) → core SpawnBody::shape
 int menuShapeToCoreShape( int menuShape )
 {
 	switch ( menuShape )
@@ -33,6 +42,8 @@ int menuShapeToCoreShape( int menuShape )
 			return 1; // sphere
 		case 3:
 			return 2; // capsule
+		case 4:
+			return 4; // exact triangle mesh (static/kinematic)
 		default:
 			return 3; // input hull
 	}
@@ -212,6 +223,43 @@ bool chooseAnchorIndices( const Position* points, int pointCount, float cx, floa
 	return true;
 }
 
+void addJointPreviewMarker( SOP_Output* output, bool enabled, bool showPivot, float pivotX, float pivotY, float pivotZ,
+								  float sizeX, float sizeY, float sizeZ, const BodyTransform& t, std::vector<Position>& bounds )
+{
+	if ( !enabled || !showPivot )
+	{
+		return;
+	}
+
+	b3Matrix3 r = rotationFromTransform( t );
+	float span = 0.12f * ( sizeX > sizeY ? ( sizeX > sizeZ ? sizeX : sizeZ ) : ( sizeY > sizeZ ? sizeY : sizeZ ) );
+	if ( span < 0.08f )
+	{
+		span = 0.08f;
+	}
+
+	Position c = applyTransform( r, t, pivotX, pivotY, pivotZ );
+	Position px = applyTransform( r, t, pivotX + span, pivotY, pivotZ );
+	Position py = applyTransform( r, t, pivotX, pivotY + span, pivotZ );
+	Position pz = applyTransform( r, t, pivotX, pivotY, pivotZ + span );
+
+	int32_t ic = output->addPoint( c );
+	int32_t ix = output->addPoint( px );
+	int32_t iy = output->addPoint( py );
+	int32_t iz = output->addPoint( pz );
+	const int32_t lx[2] = { ic, ix };
+	const int32_t ly[2] = { ic, iy };
+	const int32_t lz[2] = { ic, iz };
+	output->addLine( lx, 2 );
+	output->addLine( ly, 2 );
+	output->addLine( lz, 2 );
+
+	bounds.push_back( c );
+	bounds.push_back( px );
+	bounds.push_back( py );
+	bounds.push_back( pz );
+}
+
 bool buildFrameFromAnchors( const Position* points, int pointCount, const int anchors[3], FrameBasis& out )
 {
 	if ( points == nullptr || pointCount < 3 )
@@ -286,6 +334,37 @@ void quatFromFrame( const FrameBasis& f, float& qx, float& qy, float& qz, float&
 		qy = ( m12 + m21 ) / s;
 		qz = 0.25f * s;
 	}
+}
+
+// TD object matrices are [row][col] with column-vector convention: rotation
+// axes in the columns, translation in [0..2][3]. Scale is stripped by
+// normalizing the axes (rigid bodies cannot scale).
+void poseFromObjectTransform( const double m[4][4], float& px, float& py, float& pz, float& qx, float& qy, float& qz,
+							  float& qw )
+{
+	px = (float)m[0][3];
+	py = (float)m[1][3];
+	pz = (float)m[2][3];
+
+	FrameBasis f;
+	f.x[0] = (float)m[0][0];
+	f.x[1] = (float)m[1][0];
+	f.x[2] = (float)m[2][0];
+	f.y[0] = (float)m[0][1];
+	f.y[1] = (float)m[1][1];
+	f.y[2] = (float)m[2][1];
+	f.z[0] = (float)m[0][2];
+	f.z[1] = (float)m[1][2];
+	f.z[2] = (float)m[2][2];
+
+	if ( !normalizeVec( f.x ) || !normalizeVec( f.y ) || !normalizeVec( f.z ) )
+	{
+		qx = qy = qz = 0.0f;
+		qw = 1.0f;
+		return;
+	}
+
+	quatFromFrame( f, qx, qy, qz, qw );
 }
 
 float edgeLength( const Position& a, const Position& b )
@@ -364,7 +443,7 @@ void DestroySOPInstance( SOP_CPlusPlusBase* instance )
 
 } // extern "C"
 
-Box3DBodySOP::Box3DBodySOP( const OP_NodeInfo* info ) : myOpId( info->opId )
+Box3DBodySOP::Box3DBodySOP( const OP_NodeInfo* info ) : myOpId( info->opId ), myNodeInfo( info )
 {
 }
 
@@ -410,10 +489,164 @@ Box3DBodySOP::BodySettings Box3DBodySOP::readSettings( const OP_Inputs* inputs )
 	s.posZ = (float)z;
 
 	s.type = inputs->getParInt( TypeName );
+	s.bullet = inputs->getParInt( BulletccdName ) != 0;
+	s.jointEnabled = inputs->getParInt( JointName ) != 0;
+	inputs->getParDouble3( JointpivotName, x, y, z );
+	s.jointPivotX = (float)x;
+	s.jointPivotY = (float)y;
+	s.jointPivotZ = (float)z;
+	s.showJointPivot = inputs->getParInt( ShowjointpivotName ) != 0;
 	s.density = (float)inputs->getParDouble( DensityName );
 	s.friction = (float)inputs->getParDouble( FrictionName );
 	s.restitution = (float)inputs->getParDouble( RestitutionName );
 	return s;
+}
+
+bool Box3DBodySOP::applyJointAttributesFromInput( const OP_SOPInput* input, BodySettings& s ) const
+{
+	if ( input == nullptr )
+	{
+		return false;
+	}
+
+	const SOP_CustomAttribData* enabledAttr = input->getCustomAttribute( JointenabledAttrName );
+	const SOP_CustomAttribData* pivotAttr = input->getCustomAttribute( JointpivotAttrName );
+	if ( enabledAttr == nullptr && pivotAttr == nullptr )
+	{
+		return false;
+	}
+
+	if ( enabledAttr != nullptr && enabledAttr->numComponents >= 1 )
+	{
+		if ( enabledAttr->attribType == AttribType::Int && enabledAttr->intData != nullptr )
+		{
+			s.jointEnabled = enabledAttr->intData[0] != 0;
+		}
+		else if ( enabledAttr->attribType == AttribType::Float && enabledAttr->floatData != nullptr )
+		{
+			s.jointEnabled = enabledAttr->floatData[0] > 0.5f;
+		}
+	}
+
+	if ( pivotAttr != nullptr && pivotAttr->numComponents >= 3 )
+	{
+		int pivotSpace = 0; // 0 = object/world input space, 1 = local body space
+		const SOP_CustomAttribData* pivotSpaceAttr = input->getCustomAttribute( JointpivotspaceAttrName );
+		if ( pivotSpaceAttr != nullptr && pivotSpaceAttr->numComponents >= 1 )
+		{
+			if ( pivotSpaceAttr->attribType == AttribType::Int && pivotSpaceAttr->intData != nullptr )
+			{
+				pivotSpace = pivotSpaceAttr->intData[0];
+			}
+			else if ( pivotSpaceAttr->attribType == AttribType::Float && pivotSpaceAttr->floatData != nullptr )
+			{
+				pivotSpace = pivotSpaceAttr->floatData[0] > 0.5f ? 1 : 0;
+			}
+		}
+
+		float px = 0.0f;
+		float py = 0.0f;
+		float pz = 0.0f;
+		if ( pivotAttr->attribType == AttribType::Float && pivotAttr->floatData != nullptr )
+		{
+			px = pivotAttr->floatData[0];
+			py = pivotAttr->floatData[1];
+			pz = pivotAttr->floatData[2];
+			s.jointEnabled = true;
+		}
+		else if ( pivotAttr->attribType == AttribType::Int && pivotAttr->intData != nullptr )
+		{
+			px = (float)pivotAttr->intData[0];
+			py = (float)pivotAttr->intData[1];
+			pz = (float)pivotAttr->intData[2];
+			s.jointEnabled = true;
+		}
+
+		const int pointCount = input->getNumPoints();
+		const Position* points = input->getPointPositions();
+
+		if ( pivotSpace == 1 )
+		{
+			// Legacy local pivot (offset from centroid): bring it back to the
+			// input space so all paths hand the same thing downstream.
+			double cx = 0.0, cy = 0.0, cz = 0.0;
+			for ( int i = 0; i < pointCount; ++i )
+			{
+				cx += points[i].x;
+				cy += points[i].y;
+				cz += points[i].z;
+			}
+			if ( pointCount > 0 )
+			{
+				cx /= pointCount;
+				cy /= pointCount;
+				cz /= pointCount;
+			}
+			px += (float)cx;
+			py += (float)cy;
+			pz += (float)cz;
+		}
+
+		// The Set Joint SOP also encodes the pivot relative to reference
+		// points of the geometry (joint_ref + joint_ref_w). Rebuilding it from
+		// the CURRENT point positions makes the pivot follow any SOP applied
+		// between the Set Joint and this node (Transform, etc.); the raw
+		// joint_pivot value is only the static fallback.
+		const SOP_CustomAttribData* refAttr = input->getCustomAttribute( JointrefAttrName );
+		const SOP_CustomAttribData* refWAttr = input->getCustomAttribute( JointrefwAttrName );
+		if ( refAttr != nullptr && refAttr->numComponents >= 4 && refAttr->attribType == AttribType::Int &&
+			 refAttr->intData != nullptr && refWAttr != nullptr && refWAttr->numComponents >= 3 &&
+			 refWAttr->attribType == AttribType::Float && refWAttr->floatData != nullptr && points != nullptr )
+		{
+			const int32_t i0 = refAttr->intData[0];
+			const int32_t i1 = refAttr->intData[1];
+			const int32_t i2 = refAttr->intData[2];
+			const int32_t i3 = refAttr->intData[3];
+			const float a = refWAttr->floatData[0];
+			const float b = refWAttr->floatData[1];
+			const float c = refWAttr->floatData[2];
+
+			if ( i0 >= 0 && i0 < pointCount )
+			{
+				const Position& p0 = points[i0];
+				if ( i1 >= 0 && i1 < pointCount && i2 >= 0 && i2 < pointCount )
+				{
+					float e1[3] = { points[i1].x - p0.x, points[i1].y - p0.y, points[i1].z - p0.z };
+					float e2[3] = { points[i2].x - p0.x, points[i2].y - p0.y, points[i2].z - p0.z };
+					float e3[3];
+					if ( i3 >= 0 && i3 < pointCount )
+					{
+						e3[0] = points[i3].x - p0.x;
+						e3[1] = points[i3].y - p0.y;
+						e3[2] = points[i3].z - p0.z;
+					}
+					else
+					{
+						// Planar encoding: third axis is the normalized plane normal.
+						vecCross( e1, e2, e3 );
+						normalizeVec( e3 );
+					}
+					px = p0.x + a * e1[0] + b * e2[0] + c * e3[0];
+					py = p0.y + a * e1[1] + b * e2[1] + c * e3[1];
+					pz = p0.z + a * e1[2] + b * e2[2] + c * e3[2];
+				}
+				else
+				{
+					px = p0.x + a;
+					py = p0.y + b;
+					pz = p0.z + c;
+				}
+			}
+		}
+
+		// Input/object-space pivot; execute() converts it to body-local once
+		// the body origin (centroid) and spawn frame are known.
+		s.jointPivotX = px;
+		s.jointPivotY = py;
+		s.jointPivotZ = pz;
+	}
+
+	return true;
 }
 
 void Box3DBodySOP::execute( SOP_Output* output, const OP_Inputs* inputs, void* )
@@ -422,6 +655,7 @@ void Box3DBodySOP::execute( SOP_Output* output, const OP_Inputs* inputs, void* )
 
 	const OP_SOPInput* input = inputs->getInputSOP( 0 );
 	BodySettings settings = readSettings( inputs );
+	bool hasInputJointAttrs = applyJointAttributesFromInput( input, settings );
 
 	// Reading the solver CHOP creates the cook dependency: TD cooks (and
 	// steps) the solver before this node.
@@ -443,6 +677,12 @@ void Box3DBodySOP::execute( SOP_Output* output, const OP_Inputs* inputs, void* )
 		myHullLocalPoints.clear();
 
 		// No simulation: show the input (or the primitive preview) untransformed
+		myLastSettings = settings;
+		// Geometry is drawn raw (centroid 0, identity pose), so the preview
+		// pivot is the object-space value as-is.
+		myJointPivotLocal[0] = settings.jointPivotX;
+		myJointPivotLocal[1] = settings.jointPivotY;
+		myJointPivotLocal[2] = settings.jointPivotZ;
 		BodyTransform identity = { 0, 0, 0, 0, 0, 0, 1 };
 		if ( input != nullptr )
 		{
@@ -483,7 +723,18 @@ void Box3DBodySOP::execute( SOP_Output* output, const OP_Inputs* inputs, void* )
 		myResetPending = false;
 	}
 
+	// Persistent (set every cook, not only on rebuild): mesh shape cannot be
+	// dynamic — the engine only supports concave meshes on non-moving bodies.
+	if ( settings.shape == 4 && settings.type == 0 && input != nullptr )
+	{
+		myWarning = "Mesh (Static) cannot be Dynamic (engine limit); the body is treated as Static. "
+					"Use Input Hull for dynamic bodies.";
+	}
+
 	inputs->enablePar( PositionName, input == nullptr );
+	inputs->enablePar( JointName, !hasInputJointAttrs );
+	inputs->enablePar( JointpivotName, !hasInputJointAttrs && settings.jointEnabled );
+	inputs->enablePar( ShowjointpivotName, !hasInputJointAttrs && settings.jointEnabled );
 	uint32_t sopId = input != nullptr ? input->opId : 0;
 	int64_t sopCooks = input != nullptr ? input->totalCooks : -1;
 
@@ -494,6 +745,7 @@ void Box3DBodySOP::execute( SOP_Output* output, const OP_Inputs* inputs, void* )
 	{
 		SpawnBody def;
 		def.type = 2 - settings.type; // menu dynamic/kinematic/static → core 2/1/0
+		def.bullet = settings.bullet;
 		def.density = settings.density;
 		def.friction = settings.friction;
 		def.restitution = settings.restitution;
@@ -626,7 +878,71 @@ void Box3DBodySOP::execute( SOP_Output* output, const OP_Inputs* inputs, void* )
 			}
 
 
-			if ( def.shape == 3 )
+			if ( def.shape == 4 )
+			{
+				// Exact triangle mesh: concave geometry (terrain, tubes)
+				// collides per-triangle. box3d only supports this on
+				// non-dynamic bodies, so dynamic falls back to static here
+				// (the persistent warning is set outside the rebuild block).
+				if ( def.type == 2 )
+				{
+					def.type = 0;
+				}
+
+				def.hullPoints.reserve( pointCount * 3 );
+				for ( int i = 0; i < pointCount; ++i )
+				{
+					def.hullPoints.push_back( points[i].x - myCentroid[0] );
+					def.hullPoints.push_back( points[i].y - myCentroid[1] );
+					def.hullPoints.push_back( points[i].z - myCentroid[2] );
+				}
+
+				int primCount = input->getNumPrimitives();
+				for ( int i = 0; i < primCount; ++i )
+				{
+					const SOP_PrimitiveInfo& prim = input->getPrimitive( i );
+					if ( prim.type != PrimitiveType::Polygon || prim.numVertices < 3 )
+					{
+						continue;
+					}
+					for ( int v = 1; v < prim.numVertices - 1; ++v )
+					{
+						def.meshIndices.push_back( prim.pointIndices[0] );
+						def.meshIndices.push_back( prim.pointIndices[v] );
+						def.meshIndices.push_back( prim.pointIndices[v + 1] );
+					}
+				}
+
+				// Keep the box fallback sizes in sync with the geometry bounds
+				// in case the mesh cannot be built.
+				if ( def.hullPoints.size() >= 3 )
+				{
+					float minX = def.hullPoints[0], maxX = def.hullPoints[0];
+					float minY = def.hullPoints[1], maxY = def.hullPoints[1];
+					float minZ = def.hullPoints[2], maxZ = def.hullPoints[2];
+					for ( size_t i = 3; i + 2 < def.hullPoints.size(); i += 3 )
+					{
+						if ( def.hullPoints[i] < minX )
+							minX = def.hullPoints[i];
+						if ( def.hullPoints[i] > maxX )
+							maxX = def.hullPoints[i];
+						if ( def.hullPoints[i + 1] < minY )
+							minY = def.hullPoints[i + 1];
+						if ( def.hullPoints[i + 1] > maxY )
+							maxY = def.hullPoints[i + 1];
+						if ( def.hullPoints[i + 2] < minZ )
+							minZ = def.hullPoints[i + 2];
+						if ( def.hullPoints[i + 2] > maxZ )
+							maxZ = def.hullPoints[i + 2];
+					}
+
+					constexpr float kMinExtent = 0.001f;
+					def.sizeX = ( maxX - minX ) > kMinExtent ? ( maxX - minX ) : kMinExtent;
+					def.sizeY = ( maxY - minY ) > kMinExtent ? ( maxY - minY ) : kMinExtent;
+					def.sizeZ = ( maxZ - minZ ) > kMinExtent ? ( maxZ - minZ ) : kMinExtent;
+				}
+			}
+			else if ( def.shape == 3 )
 			{
 				if ( (int)myHullLocalPoints.size() == pointCount * 3 )
 				{
@@ -690,7 +1006,52 @@ void Box3DBodySOP::execute( SOP_Output* output, const OP_Inputs* inputs, void* )
 			def.py = settings.posY;
 			def.pz = settings.posZ;
 			int coreShape = menuShapeToCoreShape( settings.shape );
-			def.shape = coreShape == 3 ? 0 : coreShape;
+			// Hull and mesh need input geometry; both preview as a box.
+			def.shape = ( coreShape == 3 || coreShape == 4 ) ? 0 : coreShape;
+		}
+
+		def.jointEnabled = settings.jointEnabled;
+
+		// Convert the pivot to body-local exactly once, now that the body
+		// origin and spawn orientation are final. Attribute pivots come in
+		// input/object space (absolute); the manual parameter is an offset
+		// from the body origin in world axes. Either way the core stores the
+		// pivot in the body frame and re-rotates it with the live pose, so it
+		// must be expressed in the same frame as the hull points (def.q).
+		{
+			float offX = settings.jointPivotX;
+			float offY = settings.jointPivotY;
+			float offZ = settings.jointPivotZ;
+			if ( input != nullptr && hasInputJointAttrs )
+			{
+				offX -= myCentroid[0];
+				offY -= myCentroid[1];
+				offZ -= myCentroid[2];
+			}
+
+			b3Matrix3 bodyR = rotationFromQuat( def.qx, def.qy, def.qz, def.qw );
+			float lx = bodyR.cx.x * offX + bodyR.cx.y * offY + bodyR.cx.z * offZ;
+			float ly = bodyR.cy.x * offX + bodyR.cy.y * offY + bodyR.cy.z * offZ;
+			float lz = bodyR.cz.x * offX + bodyR.cz.y * offY + bodyR.cz.z * offZ;
+
+			// Under rigid upstream animation the local pivot is invariant up to
+			// float noise; snap to the previous value so the core's exact spec
+			// compare does not flag the joints dirty (full re-sync) every frame.
+			constexpr float kPivotSnap = 1e-4f;
+			if ( fabsf( lx - myJointPivotLocal[0] ) < kPivotSnap && fabsf( ly - myJointPivotLocal[1] ) < kPivotSnap &&
+				 fabsf( lz - myJointPivotLocal[2] ) < kPivotSnap )
+			{
+				lx = myJointPivotLocal[0];
+				ly = myJointPivotLocal[1];
+				lz = myJointPivotLocal[2];
+			}
+
+			myJointPivotLocal[0] = lx;
+			myJointPivotLocal[1] = ly;
+			myJointPivotLocal[2] = lz;
+			def.jointPivotX = lx;
+			def.jointPivotY = ly;
+			def.jointPivotZ = lz;
 		}
 
 		core->setGroup( myOpId, { def } );
@@ -699,6 +1060,10 @@ void Box3DBodySOP::execute( SOP_Output* output, const OP_Inputs* inputs, void* )
 		mySopId = sopId;
 		mySopCooks = sopCooks;
 	}
+
+	// Keep the node path registered (it changes on rename/move) so the
+	// solver's Joints DAT can reference this group.
+	core->setGroupPath( myOpId, myNodeInfo->opPath );
 
 	BodyTransform t = { 0, 0, 0, 0, 0, 0, 1 };
 	core->getGroupTransforms( myOpId, &t, 1 );
@@ -806,6 +1171,9 @@ void Box3DBodySOP::outputTransformedInput( SOP_Output* output, const OP_SOPInput
 
 		if ( !worldPoints.empty() )
 		{
+			addJointPreviewMarker( output, myLastSettings.jointEnabled, myLastSettings.showJointPivot, myJointPivotLocal[0],
+								   myJointPivotLocal[1], myJointPivotLocal[2], myLastSettings.sizeX,
+								   myLastSettings.sizeY, myLastSettings.sizeZ, t, worldPoints );
 			setBoundsFromPoints( output, worldPoints.data(), (int)worldPoints.size() );
 		}
 
@@ -831,6 +1199,9 @@ void Box3DBodySOP::outputTransformedInput( SOP_Output* output, const OP_SOPInput
 			getLocalPoint( i, lx, ly, lz );
 			worldPoints.push_back( applyTransform( r, t, lx, ly, lz ) );
 		}
+		addJointPreviewMarker( output, myLastSettings.jointEnabled, myLastSettings.showJointPivot, myJointPivotLocal[0],
+							   myJointPivotLocal[1], myJointPivotLocal[2], myLastSettings.sizeX,
+							   myLastSettings.sizeY, myLastSettings.sizeZ, t, worldPoints );
 		setBoundsFromPoints( output, worldPoints.data(), pointCount );
 	}
 
@@ -863,9 +1234,9 @@ void Box3DBodySOP::outputPrimitiveMesh( SOP_Output* output, const BodySettings& 
 	b3Matrix3 r = rotationFromTransform( t );
 
 	int coreShape = menuShapeToCoreShape( s.shape );
-	if ( coreShape == 3 )
+	if ( coreShape == 3 || coreShape == 4 )
 	{
-		coreShape = 0; // no input: hull previews as a box
+		coreShape = 0; // no input: hull/mesh preview as a box
 	}
 
 	if ( coreShape == 0 )
@@ -885,6 +1256,8 @@ void Box3DBodySOP::outputPrimitiveMesh( SOP_Output* output, const BodySettings& 
 									  corners[i][2] * corners[i][2] + 1e-12f );
 			output->setNormal( rotateVector( r, corners[i][0] * inv, corners[i][1] * inv, corners[i][2] * inv ), i );
 		}
+		addJointPreviewMarker( output, s.jointEnabled, s.showJointPivot, s.jointPivotX, s.jointPivotY, s.jointPivotZ,
+							   s.sizeX, s.sizeY, s.sizeZ, t, worldPoints );
 		setBoundsFromPoints( output, worldPoints.data(), (int)worldPoints.size() );
 		const int32_t tris[36] = { 0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4,
 								   2, 3, 7, 2, 7, 6, 1, 2, 6, 1, 6, 5, 0, 4, 7, 0, 7, 3 };
@@ -953,12 +1326,13 @@ void Box3DBodySOP::executeVBO( SOP_VBOOutput*, const OP_Inputs*, void* )
 
 int32_t Box3DBodySOP::getNumInfoCHOPChans( void* )
 {
-	return 6;
+	return 13;
 }
 
 void Box3DBodySOP::getInfoCHOPChan( int32_t index, OP_InfoCHOPChan* chan, void* )
 {
-	static const char* names[6] = { "tx", "ty", "tz", "rx", "ry", "rz" };
+	static const char* names[13] = { "tx", "ty", "tz", "rx", "ry", "rz", "vx",
+									 "vy", "vz", "wx", "wy", "wz", "awake" };
 	chan->name->setString( names[index] );
 
 	if ( index < 3 )
@@ -968,10 +1342,28 @@ void Box3DBodySOP::getInfoCHOPChan( int32_t index, OP_InfoCHOPChan* chan, void* 
 		return;
 	}
 
-	float rx, ry, rz;
-	quatToEulerXYZDegrees( myTransform.qx, myTransform.qy, myTransform.qz, myTransform.qw, &rx, &ry, &rz );
-	const float rot[3] = { rx, ry, rz };
-	chan->value = rot[index - 3];
+	if ( index < 6 )
+	{
+		float rx, ry, rz;
+		quatToEulerXYZDegrees( myTransform.qx, myTransform.qy, myTransform.qz, myTransform.qw, &rx, &ry, &rz );
+		const float rot[3] = { rx, ry, rz };
+		chan->value = rot[index - 3];
+		return;
+	}
+
+	// Velocities and awake state, straight from the live body (zeros when the
+	// solver is missing). Angular velocity in deg/s.
+	constexpr float kRadToDeg = 57.295779513082320877f;
+	tdb3::BodyState state = {};
+	SolverCore* core = mySolverOpId != 0 ? Registry::find( mySolverOpId ) : nullptr;
+	if ( core != nullptr )
+	{
+		core->getGroupStates( myOpId, &state, 1 );
+	}
+
+	const float rest[7] = { state.vx, state.vy, state.vz, state.wx * kRadToDeg, state.wy * kRadToDeg,
+							state.wz * kRadToDeg, state.awake };
+	chan->value = rest[index - 6];
 }
 
 void Box3DBodySOP::getWarningString( OP_String* warning, void* )
@@ -1006,9 +1398,9 @@ void Box3DBodySOP::setupParameters( OP_ParameterManager* manager, void* )
 		p.label = "Shape";
 		p.page = "Body";
 		p.defaultValue = "inputhull";
-		const char* names[] = { "inputhull", "box", "sphere", "capsule" };
-		const char* labels[] = { "Input Hull", "Box", "Sphere", "Capsule" };
-		manager->appendMenu( p, 4, names, labels );
+		const char* names[] = { "inputhull", "box", "sphere", "capsule", "mesh" };
+		const char* labels[] = { "Input Hull", "Box", "Sphere", "Capsule", "Mesh (Static)" };
+		manager->appendMenu( p, 5, names, labels );
 	}
 
 	{
@@ -1025,6 +1417,37 @@ void Box3DBodySOP::setupParameters( OP_ParameterManager* manager, void* )
 			p.clampMins[i] = true;
 		}
 		manager->appendXYZ( p );
+	}
+
+	{
+		OP_NumericParameter p;
+		p.name = JointName;
+		p.label = "Joint";
+		p.page = "Body";
+		p.defaultValues[0] = 0.0;
+		manager->appendToggle( p );
+	}
+
+	{
+		OP_NumericParameter p;
+		p.name = JointpivotName;
+		p.label = "Joint Pivot";
+		p.page = "Body";
+		for ( int i = 0; i < 3; ++i )
+		{
+			p.minSliders[i] = -10.0;
+			p.maxSliders[i] = 10.0;
+		}
+		manager->appendXYZ( p );
+	}
+
+	{
+		OP_NumericParameter p;
+		p.name = ShowjointpivotName;
+		p.label = "Show Joint Pivot";
+		p.page = "Body";
+		p.defaultValues[0] = 0.0;
+		manager->appendToggle( p );
 	}
 
 	{
@@ -1052,6 +1475,15 @@ void Box3DBodySOP::setupParameters( OP_ParameterManager* manager, void* )
 		const char* names[] = { "dynamic", "kinematic", "static" };
 		const char* labels[] = { "Dynamic", "Kinematic", "Static" };
 		manager->appendMenu( p, 3, names, labels );
+	}
+
+	{
+		OP_NumericParameter p;
+		p.name = BulletccdName;
+		p.label = "CCD (Bullet)";
+		p.page = "Body";
+		p.defaultValues[0] = 0.0;
+		manager->appendToggle( p );
 	}
 
 	{

@@ -1,6 +1,8 @@
 #include "Box3DSolverCHOP.h"
 
+#include <cstdio>
 #include <cstring>
+#include <vector>
 
 using namespace tdb3;
 
@@ -17,6 +19,7 @@ constexpr char ExternalaccelName[] = "Externalaccel";
 constexpr char SubstepsName[] = "Substeps";
 constexpr char MaxstepspercookName[] = "Maxstepspercook";
 constexpr char WorkersName[] = "Workers";
+constexpr char SleepName[] = "Sleep";
 constexpr char GroundName[] = "Ground";
 constexpr char GroundsizeName[] = "Groundsize";
 constexpr char ContainerName[] = "Container";
@@ -49,6 +52,7 @@ WorldSettings readWorldSettings( const OP_Inputs* inputs )
 	s.workerCount = inputs->getParInt( WorkersName );
 	s.subSteps = inputs->getParInt( SubstepsName );
 	s.maxStepsPerCook = inputs->getParInt( MaxstepspercookName );
+	s.sleep = inputs->getParInt( SleepName ) != 0;
 	return s;
 }
 
@@ -165,12 +169,15 @@ void Box3DSolverCHOP::execute( CHOP_Output* output, const OP_Inputs* inputs, voi
 	// ---- collision mesh ----
 	uint32_t collisionId = hasCollision ? collisionSop->opId : 0;
 	int64_t collisionCooks = hasCollision ? collisionSop->totalCooks : -1;
-	bool collisionChanged = collisionId != myCollisionSopId ||
-							( hasCollision && resetOnCollision && collisionCooks != myCollisionSopCooks );
-
+	bool collisionChanged = collisionId != myCollisionSopId || collisionCooks != myCollisionSopCooks;
 	if ( collisionChanged )
 	{
-		if ( hasCollision )
+		if ( resetOnCollision )
+		{
+			core->requestRebuild();
+		}
+
+		if ( collisionSop != nullptr )
 		{
 			std::vector<float> vertices;
 			std::vector<int32_t> indices;
@@ -190,8 +197,11 @@ void Box3DSolverCHOP::execute( CHOP_Output* output, const OP_Inputs* inputs, voi
 		}
 
 		myCollisionSopId = collisionId;
-		myCollisionSopCooks = collisionCooks;
 	}
+
+	// Track the cook count even when not applying, so toggling Reset On
+	// Collision SOP Change back on does not fire a spurious world rebuild.
+	myCollisionSopCooks = collisionCooks;
 
 	if ( myResetPending )
 	{
@@ -214,7 +224,7 @@ void Box3DSolverCHOP::execute( CHOP_Output* output, const OP_Inputs* inputs, voi
 
 int32_t Box3DSolverCHOP::getNumInfoCHOPChans( void* )
 {
-	return 3;
+	return 4;
 }
 
 void Box3DSolverCHOP::getInfoCHOPChan( int32_t index, OP_InfoCHOPChan* chan, void* )
@@ -231,10 +241,15 @@ void Box3DSolverCHOP::getInfoCHOPChan( int32_t index, OP_InfoCHOPChan* chan, voi
 		chan->name->setString( "body_count" );
 		chan->value = core != nullptr ? (float)core->totalBodyCount() : 0.0f;
 	}
-	else
+	else if ( index == 2 )
 	{
 		chan->name->setString( "step_count" );
 		chan->value = core != nullptr ? (float)core->stepCount() : 0.0f;
+	}
+	else
+	{
+		chan->name->setString( "joint_count" );
+		chan->value = core != nullptr ? (float)core->activeJointCount() : 0.0f;
 	}
 }
 
@@ -333,6 +348,15 @@ void Box3DSolverCHOP::setupParameters( OP_ParameterManager* manager, void* )
 		p.clampMins[0] = true;
 		p.clampMaxes[0] = true;
 		manager->appendInt( p );
+	}
+
+	{
+		OP_NumericParameter p;
+		p.name = SleepName;
+		p.label = "Allow Sleep";
+		p.page = "Solver";
+		p.defaultValues[0] = 1.0;
+		manager->appendToggle( p );
 	}
 
 	{

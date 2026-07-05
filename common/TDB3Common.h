@@ -29,6 +29,7 @@ constexpr char DensityParName[] = "Density";
 constexpr char FrictionParName[] = "Friction";
 constexpr char RestitutionParName[] = "Restitution";
 constexpr char TypeParName[] = "Type";
+constexpr char BulletccdParName[] = "Bulletccd";
 
 struct SpawnDefaults
 {
@@ -38,11 +39,12 @@ struct SpawnDefaults
 	float friction = 0.6f;
 	float restitution = 0.0f;
 	int type = 2;
+	bool bullet = false;
 
 	bool operator!=( const SpawnDefaults& o ) const
 	{
 		return shape != o.shape || sizeX != o.sizeX || sizeY != o.sizeY || sizeZ != o.sizeZ || density != o.density ||
-			   friction != o.friction || restitution != o.restitution || type != o.type;
+			   friction != o.friction || restitution != o.restitution || type != o.type || bullet != o.bullet;
 	}
 };
 
@@ -61,6 +63,7 @@ inline SpawnDefaults readSpawnDefaults( const TD::OP_Inputs* inputs )
 	d.friction = (float)inputs->getParDouble( FrictionParName );
 	d.restitution = (float)inputs->getParDouble( RestitutionParName );
 	d.type = inputs->getParInt( TypeParName );
+	d.bullet = inputs->getParInt( BulletccdParName ) != 0;
 	return d;
 }
 
@@ -151,6 +154,15 @@ inline void appendBodyParameters( TD::OP_ParameterManager* manager, const char* 
 		const char* labels[] = { "Static", "Kinematic", "Dynamic" };
 		manager->appendMenu( p, 3, names, labels );
 	}
+
+	{
+		TD::OP_NumericParameter p;
+		p.name = BulletccdParName;
+		p.label = "CCD (Bullet)";
+		p.page = page;
+		p.defaultValues[0] = 0.0;
+		manager->appendToggle( p );
+	}
 }
 
 // Read one component of an optional per-point attribute, falling back to a
@@ -224,6 +236,7 @@ inline std::vector<SpawnBody> parseSpawnSop( const TD::OP_SOPInput* sop, const S
 	const TD::SOP_CustomAttribData* frictionAttr = sop->getCustomAttribute( "friction" );
 	const TD::SOP_CustomAttribData* restitutionAttr = sop->getCustomAttribute( "restitution" );
 	const TD::SOP_CustomAttribData* typeAttr = sop->getCustomAttribute( "type" );
+	const TD::SOP_CustomAttribData* bulletAttr = sop->getCustomAttribute( "bullet" );
 	const TD::SOP_CustomAttribData* orientAttr = sop->getCustomAttribute( "orient" );
 	const TD::SOP_CustomAttribData* rxAttr = sop->getCustomAttribute( "rx" );
 	const TD::SOP_CustomAttribData* ryAttr = sop->getCustomAttribute( "ry" );
@@ -282,6 +295,7 @@ inline std::vector<SpawnBody> parseSpawnSop( const TD::OP_SOPInput* sop, const S
 		d.friction = readPointAttr( frictionAttr, i, 0, defaults.friction );
 		d.restitution = readPointAttr( restitutionAttr, i, 0, defaults.restitution );
 		d.type = (int)readPointAttr( typeAttr, i, 0, (float)defaults.type );
+		d.bullet = readPointAttr( bulletAttr, i, 0, defaults.bullet ? 1.0f : 0.0f ) > 0.5f;
 
 		defs.push_back( d );
 	}

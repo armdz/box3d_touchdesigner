@@ -11,9 +11,13 @@ namespace
 constexpr char SolverName[] = "Solver";
 constexpr char ResetName[] = "Reset";
 constexpr char MaterialpresetName[] = "Materialpreset";
+constexpr char ExtrachannelsName[] = "Extrachannels";
 constexpr int kInstancesNumOutputChannels = 9;
-constexpr const char* kInstancesOutputChannelNames[kInstancesNumOutputChannels] = { "tx", "ty", "tz", "rx", "ry",
-																   "rz", "sx", "sy", "sz" };
+constexpr int kInstancesNumExtendedChannels = 16;
+// vx vy vz in units/s, wx wy wz in deg/s, awake 1/0
+constexpr const char* kInstancesOutputChannelNames[kInstancesNumExtendedChannels] = {
+	"tx", "ty", "tz", "rx", "ry", "rz", "sx", "sy", "sz", "vx", "vy", "vz", "wx", "wy", "wz", "awake"
+};
 
 void applyMaterialPreset( int preset, SpawnDefaults& defaults )
 {
@@ -55,14 +59,66 @@ void writeScaleChannels( CHOP_Output* output, const std::vector<SpawnBody>& defs
 
 		if ( i < (int)defs.size() )
 		{
-			sx = sanitizeScale( defs[i].sizeX );
-			sy = sanitizeScale( defs[i].sizeY );
-			sz = sanitizeScale( defs[i].sizeZ );
+			const SpawnBody& d = defs[i];
+			sx = sanitizeScale( d.sizeX );
+			sy = sanitizeScale( d.sizeY );
+			sz = sanitizeScale( d.sizeZ );
+
+			// Match the collision shape: spheres only use sizeX (diameter) and
+			// capsules are round in XZ, so mirror that in the render scale.
+			if ( d.shape == 1 )
+			{
+				sy = sx;
+				sz = sx;
+			}
+			else if ( d.shape == 2 )
+			{
+				sz = sx;
+			}
 		}
 
 		output->channels[6][i] = sx;
 		output->channels[7][i] = sy;
 		output->channels[8][i] = sz;
+	}
+}
+
+// Fills vx vy vz wx wy wz awake (channels 9..15) when the Extra Channels
+// toggle is on. Angular velocity converted to deg/s for TD friendliness.
+void writeStateChannels( CHOP_Output* output, SolverCore* core, uint32_t groupKey )
+{
+	if ( output->numChannels < kInstancesNumExtendedChannels )
+	{
+		return;
+	}
+
+	constexpr float kRadToDeg = 57.295779513082320877f;
+
+	int written = 0;
+	if ( core != nullptr && output->numSamples > 0 )
+	{
+		std::vector<BodyState> states( output->numSamples );
+		written = core->getGroupStates( groupKey, states.data(), output->numSamples );
+
+		for ( int i = 0; i < written; ++i )
+		{
+			const BodyState& s = states[i];
+			output->channels[9][i] = s.vx;
+			output->channels[10][i] = s.vy;
+			output->channels[11][i] = s.vz;
+			output->channels[12][i] = s.wx * kRadToDeg;
+			output->channels[13][i] = s.wy * kRadToDeg;
+			output->channels[14][i] = s.wz * kRadToDeg;
+			output->channels[15][i] = s.awake;
+		}
+	}
+
+	for ( int i = written; i < output->numSamples; ++i )
+	{
+		for ( int c = 9; c < kInstancesNumExtendedChannels; ++c )
+		{
+			output->channels[c][i] = 0.0f;
+		}
 	}
 }
 
@@ -102,7 +158,7 @@ void DestroyCHOPInstance( CHOP_CPlusPlusBase* instance )
 
 } // extern "C"
 
-Box3DBodiesCHOP::Box3DBodiesCHOP( const OP_NodeInfo* info ) : myOpId( info->opId )
+Box3DBodiesCHOP::Box3DBodiesCHOP( const OP_NodeInfo* info ) : myOpId( info->opId ), myNodeInfo( info )
 {
 }
 
@@ -136,7 +192,8 @@ bool Box3DBodiesCHOP::getOutputInfo( CHOP_OutputInfo* info, const OP_Inputs* inp
 	const OP_SOPInput* sop = inputs->getParSOP( SpawnsopParName );
 	int sampleCount = sop != nullptr ? sop->getNumPoints() : 0;
 
-	info->numChannels = kInstancesNumOutputChannels;
+	bool extra = inputs->getParInt( ExtrachannelsName ) != 0;
+	info->numChannels = extra ? kInstancesNumExtendedChannels : kInstancesNumOutputChannels;
 	info->numSamples = sampleCount > 0 ? sampleCount : 1;
 	info->startIndex = 0;
 	return true;
@@ -164,6 +221,7 @@ void Box3DBodiesCHOP::execute( CHOP_Output* output, const OP_Inputs* inputs, voi
 		myLastSpawnDefs.clear();
 		writeTransformChannels( output, nullptr, myOpId );
 		writeScaleChannels( output, myLastSpawnDefs );
+		writeStateChannels( output, nullptr, myOpId );
 		return;
 	}
 
@@ -177,6 +235,7 @@ void Box3DBodiesCHOP::execute( CHOP_Output* output, const OP_Inputs* inputs, voi
 		myLastSpawnDefs.clear();
 		writeTransformChannels( output, nullptr, myOpId );
 		writeScaleChannels( output, myLastSpawnDefs );
+		writeStateChannels( output, nullptr, myOpId );
 		return;
 	}
 
@@ -215,6 +274,10 @@ void Box3DBodiesCHOP::execute( CHOP_Output* output, const OP_Inputs* inputs, voi
 		mySopCooks = sopCooks;
 	}
 
+	// Keep the node path registered (it changes on rename/move) so the
+	// solver's Joints DAT can reference this group.
+	core->setGroupPath( myOpId, myNodeInfo->opPath );
+
 	if ( spawnSop == nullptr )
 	{
 		myWarning = "Set the Spawn SOP parameter (each point spawns one body).";
@@ -225,6 +288,7 @@ void Box3DBodiesCHOP::execute( CHOP_Output* output, const OP_Inputs* inputs, voi
 	// solver rebuilds the world on its next cook (one frame of latency).
 	writeTransformChannels( output, core, myOpId );
 	writeScaleChannels( output, myLastSpawnDefs );
+	writeStateChannels( output, core, myOpId );
 }
 
 int32_t Box3DBodiesCHOP::getNumInfoCHOPChans( void* )
@@ -266,6 +330,15 @@ void Box3DBodiesCHOP::setupParameters( OP_ParameterManager* manager, void* )
 		p.label = "Reset";
 		p.page = "Bodies";
 		manager->appendPulse( p );
+	}
+
+	{
+		OP_NumericParameter p;
+		p.name = ExtrachannelsName;
+		p.label = "Extra Channels (Velocity, Awake)";
+		p.page = "Bodies";
+		p.defaultValues[0] = 0.0;
+		manager->appendToggle( p );
 	}
 
 	{

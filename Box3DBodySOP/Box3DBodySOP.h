@@ -49,6 +49,10 @@ private:
 		float sizeX = 1.0f, sizeY = 1.0f, sizeZ = 1.0f;
 		float posX = 0.0f, posY = 3.0f, posZ = 0.0f;
 		int type = 0; // menu: 0 dynamic, 1 kinematic, 2 static
+		bool bullet = false; // continuous collision for fast dynamics
+		bool jointEnabled = false;
+		float jointPivotX = 0.0f, jointPivotY = 0.0f, jointPivotZ = 0.0f;
+		bool showJointPivot = false;
 		float density = 1.0f;
 		float friction = 0.6f;
 		float restitution = 0.0f;
@@ -56,17 +60,24 @@ private:
 		bool operator!=( const BodySettings& o ) const
 		{
 			return shape != o.shape || sizeX != o.sizeX || sizeY != o.sizeY || sizeZ != o.sizeZ || posX != o.posX ||
-				   posY != o.posY || posZ != o.posZ || type != o.type || density != o.density ||
+				   posY != o.posY || posZ != o.posZ || type != o.type || bullet != o.bullet ||
+				   jointEnabled != o.jointEnabled ||
+				   jointPivotX != o.jointPivotX || jointPivotY != o.jointPivotY || jointPivotZ != o.jointPivotZ ||
+				   showJointPivot != o.showJointPivot || density != o.density ||
 				   friction != o.friction || restitution != o.restitution;
 		}
 	};
 
 	BodySettings readSettings( const OP_Inputs* inputs ) const;
+	bool applyJointAttributesFromInput( const OP_SOPInput* input, BodySettings& s ) const;
 	void unregisterGroup();
 	void outputTransformedInput( SOP_Output* output, const OP_SOPInput* input, const tdb3::BodyTransform& t );
 	void outputPrimitiveMesh( SOP_Output* output, const BodySettings& s, const tdb3::BodyTransform& t );
 
 	const uint32_t myOpId;
+	// TD owns this and keeps opPath current; registered with the group so
+	// Joints DAT rows can reference this node by path or name.
+	const OP_NodeInfo* const myNodeInfo;
 
 	// solver binding + change tracking
 	uint32_t mySolverOpId = 0;
@@ -79,6 +90,10 @@ private:
 	// body origin used at spawn (input centroid or Position parameter);
 	// output geometry is rebuilt relative to this every frame
 	float myCentroid[3] = { 0.0f, 0.0f, 0.0f };
+
+	// joint pivot in body-local space (same frame as the hull points), as
+	// last handed to the core; also drives the preview marker
+	float myJointPivotLocal[3] = { 0.0f, 0.0f, 0.0f };
 
 	// Cached frame for input-driven rigid animation. For Input Hull we keep the
 	// local hull points stable and update pose (p,q) from this frame, so

@@ -18,12 +18,88 @@ struct Group
 {
 	std::vector<SpawnBody> defs;
 	std::vector<b3BodyId> bodies;
+	std::string path; // TD path of the owner node, for Joints DAT references
+
+	// Per-group mesh blobs for shape == 4 bodies. box3d references (does not
+	// copy) b3MeshData, so these must outlive the bodies/shapes using them
+	// and be destroyed together with them.
+	std::vector<b3MeshData*> meshes;
 };
 
-bool sameShapeMaterialAndType( const SpawnBody& a, const SpawnBody& b )
+bool sameJointSpec( const JointSpec& a, const JointSpec& b )
 {
-	if ( a.shape != b.shape || a.sizeX != b.sizeX || a.sizeY != b.sizeY || a.sizeZ != b.sizeZ ||
-		 a.density != b.density || a.friction != b.friction || a.restitution != b.restitution || a.type != b.type )
+	return a.type == b.type && a.bodyA == b.bodyA && a.indexA == b.indexA && a.bodyB == b.bodyB &&
+		   a.indexB == b.indexB && a.pivotMode == b.pivotMode && a.anchorX == b.anchorX && a.anchorY == b.anchorY &&
+		   a.anchorZ == b.anchorZ && a.axisX == b.axisX && a.axisY == b.axisY && a.axisZ == b.axisZ &&
+		   a.hertz == b.hertz && a.dampingRatio == b.dampingRatio && a.length == b.length &&
+		   a.enableLimit == b.enableLimit && a.minLength == b.minLength && a.maxLength == b.maxLength &&
+		   a.lowerAngle == b.lowerAngle && a.upperAngle == b.upperAngle && a.enableConeLimit == b.enableConeLimit &&
+		   a.coneAngle == b.coneAngle && a.enableMotor == b.enableMotor && a.motorSpeed == b.motorSpeed &&
+		   a.maxMotorForce == b.maxMotorForce && a.collideConnected == b.collideConnected;
+}
+
+// Does a Joints DAT cell reference this group? Accepts the full TD path or
+// just the node name (last path component).
+bool pathMatches( const std::string& groupPath, const std::string& ref )
+{
+	if ( groupPath.empty() || ref.empty() )
+	{
+		return false;
+	}
+	if ( groupPath == ref )
+	{
+		return true;
+	}
+	size_t slash = groupPath.find_last_of( '/' );
+	return slash != std::string::npos && groupPath.compare( slash + 1, std::string::npos, ref ) == 0;
+}
+
+// Quaternion rotating +Z onto the given (non-normalized) axis; identity when
+// the axis is degenerate.
+b3Quat quatFromZAxis( float ax, float ay, float az )
+{
+	float lengthSq = ax * ax + ay * ay + az * az;
+	if ( lengthSq < 1e-12f )
+	{
+		return b3Quat_identity;
+	}
+
+	float inv = 1.0f / sqrtf( lengthSq );
+	float x = ax * inv, y = ay * inv, z = az * inv;
+
+	// axis ≈ -Z: rotate 180 degrees around X
+	if ( z < -0.999999f )
+	{
+		b3Quat q;
+		q.v.x = 1.0f;
+		q.v.y = 0.0f;
+		q.v.z = 0.0f;
+		q.s = 0.0f;
+		return q;
+	}
+
+	// shortest arc from (0,0,1): q = (cross(z, axis), 1 + dot) normalized
+	b3Quat q;
+	q.v.x = -y;
+	q.v.y = x;
+	q.v.z = 0.0f;
+	q.s = 1.0f + z;
+	return b3NormalizeQuat( q );
+}
+
+b3Transform toLocalTransform( b3BodyId bodyId )
+{
+	b3WorldTransform wt = b3Body_GetTransform( bodyId );
+	b3Transform t;
+	t.p = b3Vec3{ (float)wt.p.x, (float)wt.p.y, (float)wt.p.z };
+	t.q = wt.q;
+	return t;
+}
+
+bool sameShapeAndType( const SpawnBody& a, const SpawnBody& b )
+{
+	if ( a.shape != b.shape || a.sizeX != b.sizeX || a.sizeY != b.sizeY || a.sizeZ != b.sizeZ || a.type != b.type ||
+		 a.bullet != b.bullet )
 	{
 		return false;
 	}
@@ -41,7 +117,25 @@ bool sameShapeMaterialAndType( const SpawnBody& a, const SpawnBody& b )
 		}
 	}
 
+	if ( a.meshIndices.size() != b.meshIndices.size() )
+	{
+		return false;
+	}
+
+	for ( size_t i = 0; i < a.meshIndices.size(); ++i )
+	{
+		if ( a.meshIndices[i] != b.meshIndices[i] )
+		{
+			return false;
+		}
+	}
+
 	return true;
+}
+
+bool sameMaterial( const SpawnBody& a, const SpawnBody& b )
+{
+	return a.density == b.density && a.friction == b.friction && a.restitution == b.restitution;
 }
 
 bool samePose( const SpawnBody& a, const SpawnBody& b )
@@ -49,7 +143,13 @@ bool samePose( const SpawnBody& a, const SpawnBody& b )
 	return a.px == b.px && a.py == b.py && a.pz == b.pz && a.qx == b.qx && a.qy == b.qy && a.qz == b.qz && a.qw == b.qw;
 }
 
-void setBodyTransformFromDef( b3BodyId bodyId, const SpawnBody& def )
+bool sameJointPivot( const SpawnBody& a, const SpawnBody& b )
+{
+	return a.jointEnabled == b.jointEnabled && a.jointPivotX == b.jointPivotX && a.jointPivotY == b.jointPivotY &&
+	       a.jointPivotZ == b.jointPivotZ;
+}
+
+b3Quat quatFromDef( const SpawnBody& def )
 {
 	b3Quat q;
 	q.v.x = 0.0f;
@@ -66,11 +166,19 @@ void setBodyTransformFromDef( b3BodyId bodyId, const SpawnBody& def )
 		q.v.z = def.qz * inv;
 		q.s = def.qw * inv;
 	}
+	return q;
+}
+
+void setBodyTransformFromDef( b3BodyId bodyId, const SpawnBody& def )
+{
+	b3Quat q = quatFromDef( def );
 
 	if ( def.type == 1 )
 	{
 		// Kinematic bodies should be driven by a target transform so Box3D can
 		// derive velocities and produce stable contacts with dynamic bodies.
+		// advance() re-targets them before every step, so the velocity decays
+		// to zero once the target is reached instead of persisting forever.
 		b3WorldTransform target = b3WorldTransform_identity;
 		target.p = b3Pos{ def.px, def.py, def.pz };
 		target.q = q;
@@ -83,11 +191,28 @@ void setBodyTransformFromDef( b3BodyId bodyId, const SpawnBody& def )
 	}
 }
 
-void createBodyFromDef( b3WorldId world, const SpawnBody& def, std::vector<b3BodyId>& outBodies )
+// Live material tweaks must not recreate bodies (that would respawn them);
+// box3d lets friction/restitution/density change on existing shapes.
+void applyMaterialToBody( b3BodyId bodyId, const SpawnBody& def )
+{
+	b3ShapeId shapes[8];
+	int count = b3Body_GetShapes( bodyId, shapes, 8 );
+	for ( int s = 0; s < count; ++s )
+	{
+		b3Shape_SetFriction( shapes[s], def.friction );
+		b3Shape_SetRestitution( shapes[s], def.restitution );
+		b3Shape_SetDensity( shapes[s], def.density, false );
+	}
+	b3Body_ApplyMassFromShapes( bodyId );
+}
+
+void createBodyFromDef( b3WorldId world, const SpawnBody& def, std::vector<b3BodyId>& outBodies,
+						std::vector<b3MeshData*>& outMeshes )
 {
 	b3BodyDef bodyDef = b3DefaultBodyDef();
 	bodyDef.type = def.type == 0 ? b3_staticBody : ( def.type == 1 ? b3_kinematicBody : b3_dynamicBody );
 	bodyDef.position = b3Pos{ def.px, def.py, def.pz };
+	bodyDef.isBullet = def.bullet && bodyDef.type == b3_dynamicBody;
 
 	float lengthSq = def.qx * def.qx + def.qy * def.qy + def.qz * def.qz + def.qw * def.qw;
 	if ( lengthSq > 0.0001f )
@@ -151,6 +276,52 @@ void createBodyFromDef( b3WorldId world, const SpawnBody& def, std::vector<b3Bod
 			b3CreateCapsuleShape( bodyId, &shapeDef, &capsule );
 			break;
 		}
+		case 4: // exact triangle mesh (concave OK); static/kinematic only
+		{
+			// Dynamic bodies cannot use mesh shapes (engine limit): degrade to
+			// the convex hull of the same vertices so the sim keeps running.
+			if ( def.type != 2 && def.hullPoints.size() >= 9 && def.meshIndices.size() >= 3 )
+			{
+				// b3CreateMesh copies into a self-contained blob; the const
+				// casts are safe, the input buffers are only read.
+				b3MeshDef meshDef = {};
+				meshDef.vertices = (b3Vec3*)def.hullPoints.data();
+				meshDef.vertexCount = (int)def.hullPoints.size() / 3;
+				meshDef.indices = (int32_t*)def.meshIndices.data();
+				meshDef.triangleCount = (int)def.meshIndices.size() / 3;
+				meshDef.identifyEdges = true;
+				// TD geometry often carries duplicated points (Facet, merged
+				// primitives). Edge adjacency works on shared indices, so
+				// weld first or bodies squeeze through the contact cracks at
+				// unshared edges.
+				meshDef.weldVertices = true;
+				meshDef.weldTolerance = 1e-4f;
+
+				b3MeshData* meshData = b3CreateMesh( &meshDef, nullptr, 0 );
+				if ( meshData != nullptr )
+				{
+					b3CreateMeshShape( bodyId, &shapeDef, meshData, b3Vec3{ 1.0f, 1.0f, 1.0f } );
+					outMeshes.push_back( meshData );
+					break;
+				}
+			}
+
+			int pointCount = (int)def.hullPoints.size() / 3;
+			if ( pointCount >= 4 )
+			{
+				b3HullData* hull = b3CreateHull( (const b3Vec3*)def.hullPoints.data(), pointCount, kHullVertexBudget );
+				if ( hull != nullptr )
+				{
+					b3CreateHullShape( bodyId, &shapeDef, hull );
+					b3DestroyHull( hull );
+					break;
+				}
+			}
+
+			b3BoxHull boxHull = b3MakeBoxHull( 0.5f * sizeX, 0.5f * sizeY, 0.5f * sizeZ );
+			b3CreateHullShape( bodyId, &shapeDef, &boxHull.base );
+			break;
+		}
 		default: // box
 		{
 			b3BoxHull hull = b3MakeBoxHull( 0.5f * sizeX, 0.5f * sizeY, 0.5f * sizeZ );
@@ -160,6 +331,19 @@ void createBodyFromDef( b3WorldId world, const SpawnBody& def, std::vector<b3Bod
 	}
 
 	outBodies.push_back( bodyId );
+}
+
+// Mesh blobs die AFTER the bodies/shapes referencing them.
+void destroyGroupMeshes( Group& group )
+{
+	for ( b3MeshData* mesh : group.meshes )
+	{
+		if ( mesh != nullptr )
+		{
+			b3DestroyMesh( mesh );
+		}
+	}
+	group.meshes.clear();
 }
 
 void destroyGroupBodies( Group& group )
@@ -172,15 +356,17 @@ void destroyGroupBodies( Group& group )
 		}
 	}
 	group.bodies.clear();
+	destroyGroupMeshes( group );
 }
 
 void createGroupBodies( b3WorldId world, Group& group )
 {
 	group.bodies.clear();
+	destroyGroupMeshes( group );
 	group.bodies.reserve( group.defs.size() );
 	for ( const SpawnBody& def : group.defs )
 	{
-		createBodyFromDef( world, def, group.bodies );
+		createBodyFromDef( world, def, group.bodies, group.meshes );
 	}
 }
 
@@ -201,6 +387,30 @@ struct SolverCore::Impl
 	WorldSettings settings;
 	std::map<uint32_t, Group> groups;
 
+	int liveJointCount = 0;
+
+	// Joints owned by Box3D Joint CHOP nodes, keyed by node opId. Resolved
+	// bodies and local frames are kept so the node can report its live anchors.
+	bool jointsDirty = false;
+
+	struct NodeJoint
+	{
+		JointSpec spec;
+		b3JointId id = b3_nullJointId;
+		b3BodyId bodyA = b3_nullBodyId;
+		b3BodyId bodyB = b3_nullBodyId;
+		b3Transform localA = b3Transform_identity;
+		b3Transform localB = b3Transform_identity;
+	};
+	std::map<uint32_t, std::vector<NodeJoint>> nodeJoints;
+
+	// Hidden static body used as the second body of world-anchored joints.
+	b3BodyId worldAnchorBody = b3_nullBodyId;
+
+	// Mesh blobs of groups removed while the world was pending a rebuild:
+	// their shapes may still be referenced until destroyWorld runs.
+	std::vector<b3MeshData*> orphanMeshes;
+
 	bool dirty = true;
 	double accumulator = 0.0;
 	int64_t stepCount = 0;
@@ -212,11 +422,30 @@ struct SolverCore::Impl
 			b3DestroyWorld( world );
 			world = b3_nullWorldId;
 		}
+		worldAnchorBody = b3_nullBodyId;
+		for ( auto& entry : nodeJoints )
+		{
+			for ( NodeJoint& nj : entry.second )
+			{
+				nj.id = b3_nullJointId;
+			}
+		}
+		liveJointCount = 0;
+		jointsDirty = true;
+		// Meshes can only die after the world (their mesh shapes) is gone.
 		for ( auto& entry : groups )
 		{
 			entry.second.bodies.clear();
+			destroyGroupMeshes( entry.second );
 		}
-		// The mesh can only die after the world (its mesh shape) is gone
+		for ( b3MeshData* mesh : orphanMeshes )
+		{
+			if ( mesh != nullptr )
+			{
+				b3DestroyMesh( mesh );
+			}
+		}
+		orphanMeshes.clear();
 		if ( meshData != nullptr )
 		{
 			b3DestroyMesh( meshData );
@@ -232,7 +461,14 @@ struct SolverCore::Impl
 		worldDef.gravity = b3Vec3{ settings.gravityX + settings.accelX, settings.gravityY + settings.accelY,
 								  settings.gravityZ + settings.accelZ };
 		worldDef.workerCount = settings.workerCount > 1 ? settings.workerCount : 1;
+		worldDef.enableSleep = settings.sleep;
 		world = b3CreateWorld( &worldDef );
+
+		// Shapeless static body: the "other side" of world-anchored joints
+		{
+			b3BodyDef anchorDef = b3DefaultBodyDef();
+			worldAnchorBody = b3CreateBody( world, &anchorDef );
+		}
 
 		if ( settings.ground )
 		{
@@ -279,6 +515,10 @@ struct SolverCore::Impl
 			meshDef.indices = meshIndices.data();
 			meshDef.triangleCount = (int)meshIndices.size() / 3;
 			meshDef.identifyEdges = true;
+			// Weld duplicated TD points so edge adjacency resolves; without it
+			// bodies squeeze through contact cracks at unshared edges.
+			meshDef.weldVertices = true;
+			meshDef.weldTolerance = 1e-4f;
 
 			meshData = b3CreateMesh( &meshDef, nullptr, 0 );
 			if ( meshData != nullptr )
@@ -300,6 +540,307 @@ struct SolverCore::Impl
 		accumulator = 0.0;
 		stepCount = 0;
 		dirty = false;
+	}
+
+	const Group* findGroupByPath( const std::string& ref ) const
+	{
+		for ( const auto& entry : groups )
+		{
+			if ( pathMatches( entry.second.path, ref ) )
+			{
+				return &entry.second;
+			}
+		}
+		return nullptr;
+	}
+
+	// Resolve a Joints DAT body reference to a live body id.
+	b3BodyId resolveBody( const std::string& ref, int index ) const
+	{
+		const Group* group = findGroupByPath( ref );
+		if ( group == nullptr || index < 0 || index >= (int)group->bodies.size() )
+		{
+			return b3_nullBodyId;
+		}
+		return group->bodies[index];
+	}
+
+	// Creates one joint from a spec, resolving body references. Returns false
+	// (leaving outId null) when a reference does not resolve yet — the caller
+	// retries on the next resync. Local frames are reported back so node
+	// joints can draw their live anchor points.
+	bool createJointFromSpec( const JointSpec& spec, b3JointId& outId, b3BodyId& outBodyA, b3BodyId& outBodyB,
+							  b3Transform& outLocalA, b3Transform& outLocalB )
+	{
+		outId = b3_nullJointId;
+
+		b3BodyId bodyA = resolveBody( spec.bodyA, spec.indexA );
+		b3BodyId bodyB = spec.bodyB.empty() ? worldAnchorBody : resolveBody( spec.bodyB, spec.indexB );
+		if ( !B3_IS_NON_NULL( bodyA ) || !B3_IS_NON_NULL( bodyB ) )
+		{
+			return false;
+		}
+
+		const Group* groupA = findGroupByPath( spec.bodyA );
+		const Group* groupB = spec.bodyB.empty() ? nullptr : findGroupByPath( spec.bodyB );
+		const bool bodyBIsWorld = spec.bodyB.empty();
+		b3Transform xfA = toLocalTransform( bodyA );
+		b3Transform xfB = toLocalTransform( bodyB );
+		b3Vec3 jointA = b3Vec3{ 0.0f, 0.0f, 0.0f };
+		b3Vec3 jointB = b3Vec3{ 0.0f, 0.0f, 0.0f };
+		if ( groupA != nullptr && spec.indexA >= 0 && spec.indexA < (int)groupA->defs.size() && groupA->defs[spec.indexA].jointEnabled )
+		{
+			const SpawnBody& def = groupA->defs[spec.indexA];
+			jointA = b3Vec3{ def.jointPivotX, def.jointPivotY, def.jointPivotZ };
+		}
+		if ( groupB != nullptr && spec.indexB >= 0 && spec.indexB < (int)groupB->defs.size() && groupB->defs[spec.indexB].jointEnabled )
+		{
+			const SpawnBody& def = groupB->defs[spec.indexB];
+			jointB = b3Vec3{ def.jointPivotX, def.jointPivotY, def.jointPivotZ };
+		}
+		b3Vec3 worldPivotA = b3Add( xfA.p, b3RotateVector( xfA.q, jointA ) );
+		b3Vec3 worldPivotB = bodyBIsWorld ? worldPivotA : b3Add( xfB.p, b3RotateVector( xfB.q, jointB ) );
+
+		// One pivot frame per body, each at that body's OWN local pivot; the
+		// z-axis is the hinge / cone axis. The joint constrains both frames to
+		// coincide, so when the pivots are apart at creation the solver pulls
+		// the bodies together until the pivots meet (Bullet-style). Using a
+		// single shared frame (e.g. the midpoint) instead would freeze the
+		// spawn separation into the constraint as a rigid offset.
+		b3Transform pivotA;
+		pivotA.q = quatFromZAxis( spec.axisX, spec.axisY, spec.axisZ );
+		pivotA.p = worldPivotA;
+		b3Transform pivotB = pivotA;
+		pivotB.p = worldPivotB;
+
+		b3Transform localA = b3InvMulTransforms( xfA, pivotA );
+		b3Transform localB = b3InvMulTransforms( xfB, pivotB );
+
+		b3JointId jointId = b3_nullJointId;
+		switch ( spec.type )
+		{
+			case 0: // distance: attach at each body origin
+			{
+				b3DistanceJointDef def = b3DefaultDistanceJointDef();
+				def.base.bodyIdA = bodyA;
+				def.base.bodyIdB = bodyB;
+				if ( spec.bodyB.empty() )
+				{
+					// The world anchor body sits at the origin, so its local
+					// frame IS world space: pin the rope at the pivot point.
+					localB.p = pivotA.p;
+				}
+				def.base.localFrameA = localA;
+				def.base.localFrameB = localB;
+				def.base.collideConnected = spec.collideConnected;
+
+				b3Vec3 worldA = b3Add( xfA.p, b3RotateVector( xfA.q, localA.p ) );
+				b3Vec3 worldB = b3Add( xfB.p, b3RotateVector( xfB.q, localB.p ) );
+				float dx = worldB.x - worldA.x;
+				float dy = worldB.y - worldA.y;
+				float dz = worldB.z - worldA.z;
+				float current = sqrtf( dx * dx + dy * dy + dz * dz );
+				def.length = spec.length >= 0.0f ? spec.length : current;
+
+				if ( spec.hertz > 0.0f )
+				{
+					def.enableSpring = true;
+					def.hertz = spec.hertz;
+					def.dampingRatio = spec.dampingRatio;
+				}
+				if ( spec.enableLimit )
+				{
+					def.enableLimit = true;
+					def.minLength = spec.minLength;
+					def.maxLength = spec.maxLength;
+				}
+				if ( spec.enableMotor )
+				{
+					def.enableMotor = true;
+					def.motorSpeed = spec.motorSpeed;
+					def.maxMotorForce = spec.maxMotorForce;
+				}
+				jointId = b3CreateDistanceJoint( world, &def );
+				break;
+			}
+			case 1: // spherical: cone on frame A z-axis, twist on frame B z-axis
+			{
+				b3SphericalJointDef def = b3DefaultSphericalJointDef();
+				def.base.bodyIdA = bodyA;
+				def.base.bodyIdB = bodyB;
+				def.base.localFrameA = localA;
+				def.base.localFrameB = localB;
+				def.base.collideConnected = spec.collideConnected;
+
+				if ( spec.hertz > 0.0f )
+				{
+					def.enableSpring = true;
+					def.hertz = spec.hertz;
+					def.dampingRatio = spec.dampingRatio;
+				}
+				if ( spec.enableConeLimit )
+				{
+					def.enableConeLimit = true;
+					def.coneAngle = spec.coneAngle;
+				}
+				if ( spec.enableLimit )
+				{
+					def.enableTwistLimit = true;
+					def.lowerTwistAngle = spec.lowerAngle;
+					def.upperTwistAngle = spec.upperAngle;
+				}
+				jointId = b3CreateSphericalJoint( world, &def );
+				break;
+			}
+			case 2: // revolute: hinge on the joint frame z-axis
+			{
+				b3RevoluteJointDef def = b3DefaultRevoluteJointDef();
+				def.base.bodyIdA = bodyA;
+				def.base.bodyIdB = bodyB;
+				def.base.localFrameA = localA;
+				def.base.localFrameB = localB;
+				def.base.collideConnected = spec.collideConnected;
+
+				if ( spec.hertz > 0.0f )
+				{
+					def.enableSpring = true;
+					def.hertz = spec.hertz;
+					def.dampingRatio = spec.dampingRatio;
+				}
+				if ( spec.enableLimit )
+				{
+					def.enableLimit = true;
+					def.lowerAngle = spec.lowerAngle;
+					def.upperAngle = spec.upperAngle;
+				}
+				if ( spec.enableMotor )
+				{
+					def.enableMotor = true;
+					def.motorSpeed = spec.motorSpeed;
+					def.maxMotorTorque = spec.maxMotorForce;
+				}
+				jointId = b3CreateRevoluteJoint( world, &def );
+				break;
+			}
+			case 3: // weld
+			{
+				b3WeldJointDef def = b3DefaultWeldJointDef();
+				def.base.bodyIdA = bodyA;
+				def.base.bodyIdB = bodyB;
+				def.base.localFrameA = localA;
+				def.base.localFrameB = localB;
+				def.base.collideConnected = spec.collideConnected;
+				def.linearHertz = spec.hertz;
+				def.angularHertz = spec.hertz;
+				def.linearDampingRatio = spec.dampingRatio > 0.0f ? spec.dampingRatio : 1.0f;
+				def.angularDampingRatio = def.linearDampingRatio;
+				jointId = b3CreateWeldJoint( world, &def );
+				break;
+			}
+			default:
+				return false;
+		}
+
+		if ( !B3_IS_NON_NULL( jointId ) )
+		{
+			return false;
+		}
+
+		outId = jointId;
+		outBodyA = bodyA;
+		outBodyB = bodyB;
+		outLocalA = localA;
+		outLocalB = localB;
+		return true;
+	}
+
+	// Destroy and recreate every Joint SOP node joint.
+	// Runs before stepping whenever groups or the world changed — box3d
+	// destroys joints attached to destroyed bodies, so ids can silently die
+	// under us and per-joint patching is not worth the bookkeeping here.
+	void syncJoints()
+	{
+		for ( auto& entry : nodeJoints )
+		{
+			for ( NodeJoint& nj : entry.second )
+			{
+				if ( B3_IS_NON_NULL( nj.id ) && b3Joint_IsValid( nj.id ) )
+				{
+					b3DestroyJoint( nj.id, true );
+				}
+				nj.id = b3_nullJointId;
+			}
+		}
+
+		liveJointCount = 0;
+
+		if ( !B3_IS_NON_NULL( world ) )
+		{
+			jointsDirty = false;
+			return;
+		}
+
+		for ( auto& entry : nodeJoints )
+		{
+			for ( NodeJoint& nj : entry.second )
+			{
+				if ( createJointFromSpec( nj.spec, nj.id, nj.bodyA, nj.bodyB, nj.localA, nj.localB ) )
+				{
+					++liveJointCount;
+				}
+			}
+		}
+
+		jointsDirty = false;
+	}
+
+	// b3Body_SetTargetTransform only sets velocities (target - current) / dt;
+	// box3d never damps kinematic bodies, so without a fresh target every step
+	// they keep the last velocity and drift forever once upstream animation
+	// stops. Re-target from the defs before each step: at the target this
+	// yields zero velocity and the body can go back to sleep. Sleeping bodies
+	// are skipped by the solver, so a kinematic that dozed off while idle must
+	// be woken explicitly when its target moves again — with wake always false
+	// a resumed upstream animation would never move it (nor anything resting
+	// on or jointed to it). Wake only on real movement so idle kinematics can
+	// keep sleeping.
+	void retargetKinematicBodies()
+	{
+		for ( auto& entry : groups )
+		{
+			Group& group = entry.second;
+			size_t count = group.bodies.size() < group.defs.size() ? group.bodies.size() : group.defs.size();
+			for ( size_t i = 0; i < count; ++i )
+			{
+				const SpawnBody& def = group.defs[i];
+				if ( def.type != 1 || !B3_IS_NON_NULL( group.bodies[i] ) )
+				{
+					continue;
+				}
+
+				b3WorldTransform target = b3WorldTransform_identity;
+				target.p = b3Pos{ def.px, def.py, def.pz };
+				target.q = quatFromDef( def );
+
+				bool wake = false;
+				if ( !b3Body_IsAwake( group.bodies[i] ) )
+				{
+					b3Pos p = b3Body_GetPosition( group.bodies[i] );
+					b3Quat q = b3Body_GetRotation( group.bodies[i] );
+					constexpr float kPosEps = 1e-5f;
+					constexpr float kRotEps = 1e-5f;
+					// q and -q are the same rotation; align signs before diffing.
+					float dot = q.v.x * target.q.v.x + q.v.y * target.q.v.y + q.v.z * target.q.v.z + q.s * target.q.s;
+					float sign = dot < 0.0f ? -1.0f : 1.0f;
+					float dq = fabsf( sign * q.v.x - target.q.v.x ) + fabsf( sign * q.v.y - target.q.v.y ) +
+							   fabsf( sign * q.v.z - target.q.v.z ) + fabsf( sign * q.s - target.q.s );
+					wake = fabsf( (float)( p.x - target.p.x ) ) > kPosEps ||
+						   fabsf( (float)( p.y - target.p.y ) ) > kPosEps ||
+						   fabsf( (float)( p.z - target.p.z ) ) > kPosEps || dq > kRotEps;
+				}
+				b3Body_SetTargetTransform( group.bodies[i], target, (float)kFixedTimeStep, wake );
+			}
+		}
 	}
 };
 
@@ -330,6 +871,7 @@ void SolverCore::setWorldSettings( const WorldSettings& settings )
 			b3Vec3{ settings.gravityX + settings.accelX, settings.gravityY + settings.accelY,
 					 settings.gravityZ + settings.accelZ } );
 		b3World_SetWorkerCount( m->world, settings.workerCount > 1 ? settings.workerCount : 1 );
+		b3World_EnableSleeping( m->world, settings.sleep );
 	}
 }
 
@@ -373,7 +915,7 @@ void SolverCore::setGroup( uint32_t groupKey, std::vector<SpawnBody> defs )
 			bool compatible = true;
 			for ( size_t i = 0; i < defs.size(); ++i )
 			{
-				if ( !sameShapeMaterialAndType( group.defs[i], defs[i] ) )
+				if ( !sameShapeAndType( group.defs[i], defs[i] ) )
 				{
 					compatible = false;
 					break;
@@ -384,12 +926,23 @@ void SolverCore::setGroup( uint32_t groupKey, std::vector<SpawnBody> defs )
 			{
 				for ( size_t i = 0; i < defs.size(); ++i )
 				{
-					// SOP/CHOP cooks can call setGroup repeatedly with identical
-					// defs; avoid re-applying transforms when pose is unchanged,
-					// otherwise dynamic bodies get effectively teleported every cook.
-					if ( !samePose( group.defs[i], defs[i] ) )
+					if ( !sameMaterial( group.defs[i], defs[i] ) )
+					{
+						applyMaterialToBody( group.bodies[i], defs[i] );
+					}
+
+					// Spawn pose changes drive static/kinematic bodies. Dynamic
+					// bodies only take their spawn pose at creation or on a world
+					// rebuild — re-applying it here would teleport them on every
+					// cook of an animated spawn SOP and the sim would never run.
+					if ( defs[i].type != 2 && !samePose( group.defs[i], defs[i] ) )
 					{
 						setBodyTransformFromDef( group.bodies[i], defs[i] );
+					}
+
+					if ( !sameJointPivot( group.defs[i], defs[i] ) )
+					{
+						m->jointsDirty = true;
 					}
 				}
 
@@ -398,11 +951,50 @@ void SolverCore::setGroup( uint32_t groupKey, std::vector<SpawnBody> defs )
 			}
 		}
 
-		// Incompatible (shape/material/count/hull changed): recreate only this
+		// Incompatible (shape/size/type/count/hull changed): recreate only this
 		// group's bodies in the current world, keep everyone else running.
+		// Dynamic bodies whose spawn pose is unchanged keep their simulated
+		// pose and velocity, so a live shape/size tweak does not reset the sim.
+		struct PreservedState
+		{
+			bool valid = false;
+			b3Pos p;
+			b3Quat q;
+			b3Vec3 v;
+			b3Vec3 w;
+		};
+		std::vector<PreservedState> preserved;
+		if ( group.bodies.size() == group.defs.size() && defs.size() == group.defs.size() )
+		{
+			preserved.resize( defs.size() );
+			for ( size_t i = 0; i < defs.size(); ++i )
+			{
+				if ( defs[i].type == 2 && group.defs[i].type == 2 && samePose( group.defs[i], defs[i] ) &&
+					 B3_IS_NON_NULL( group.bodies[i] ) )
+				{
+					preserved[i].valid = true;
+					preserved[i].p = b3Body_GetPosition( group.bodies[i] );
+					preserved[i].q = b3Body_GetRotation( group.bodies[i] );
+					preserved[i].v = b3Body_GetLinearVelocity( group.bodies[i] );
+					preserved[i].w = b3Body_GetAngularVelocity( group.bodies[i] );
+				}
+			}
+		}
+
 		destroyGroupBodies( group );
 		group.defs = std::move( defs );
 		createGroupBodies( m->world, group );
+		m->jointsDirty = true; // box3d killed any joints attached to the old bodies
+
+		for ( size_t i = 0; i < preserved.size() && i < group.bodies.size(); ++i )
+		{
+			if ( preserved[i].valid )
+			{
+				b3Body_SetTransform( group.bodies[i], preserved[i].p, preserved[i].q );
+				b3Body_SetLinearVelocity( group.bodies[i], preserved[i].v );
+				b3Body_SetAngularVelocity( group.bodies[i], preserved[i].w );
+			}
+		}
 		return;
 	}
 
@@ -411,6 +1003,7 @@ void SolverCore::setGroup( uint32_t groupKey, std::vector<SpawnBody> defs )
 		Group& group = m->groups[groupKey];
 		group.defs = std::move( defs );
 		createGroupBodies( m->world, group );
+		m->jointsDirty = true; // unresolved joint rows may reference this group
 		return;
 	}
 
@@ -431,9 +1024,14 @@ void SolverCore::removeGroup( uint32_t groupKey )
 		{
 			destroyGroupBodies( it->second );
 			m->groups.erase( it );
+			m->jointsDirty = true; // joints attached to those bodies died with them
 			return;
 		}
 
+		// World rebuild pending: the old world (and its mesh shapes) may
+		// still be alive, so park the mesh blobs until destroyWorld runs.
+		m->orphanMeshes.insert( m->orphanMeshes.end(), it->second.meshes.begin(), it->second.meshes.end() );
+		it->second.meshes.clear();
 		m->groups.erase( it );
 		m->dirty = true;
 	}
@@ -442,6 +1040,123 @@ void SolverCore::removeGroup( uint32_t groupKey )
 bool SolverCore::hasGroup( uint32_t groupKey ) const
 {
 	return myImpl->groups.find( groupKey ) != myImpl->groups.end();
+}
+
+void SolverCore::setGroupPath( uint32_t groupKey, const char* path )
+{
+	Impl* m = myImpl;
+	auto it = m->groups.find( groupKey );
+	if ( it == m->groups.end() || path == nullptr )
+	{
+		return;
+	}
+	if ( it->second.path != path )
+	{
+		it->second.path = path;
+		m->jointsDirty = true; // joint rows referencing this path can resolve now
+	}
+}
+
+int SolverCore::activeJointCount() const
+{
+	return myImpl->liveJointCount;
+}
+
+void SolverCore::setJointNodeList( uint32_t ownerKey, const std::vector<JointSpec>& specs )
+{
+	Impl* m = myImpl;
+	auto it = m->nodeJoints.find( ownerKey );
+
+	if ( specs.empty() )
+	{
+		removeJointNode( ownerKey );
+		return;
+	}
+
+	if ( it != m->nodeJoints.end() )
+	{
+		const std::vector<Impl::NodeJoint>& current = it->second;
+		if ( current.size() == specs.size() )
+		{
+			bool same = true;
+			for ( size_t i = 0; i < specs.size(); ++i )
+			{
+				if ( !sameJointSpec( current[i].spec, specs[i] ) )
+				{
+					same = false;
+					break;
+				}
+			}
+			if ( same )
+			{
+				return;
+			}
+		}
+	}
+
+	std::vector<Impl::NodeJoint>& joints = m->nodeJoints[ownerKey];
+	joints.clear();
+	joints.resize( specs.size() );
+	for ( size_t i = 0; i < specs.size(); ++i )
+	{
+		joints[i].spec = specs[i];
+	}
+	m->jointsDirty = true;
+}
+
+void SolverCore::removeJointNode( uint32_t ownerKey )
+{
+	Impl* m = myImpl;
+	auto it = m->nodeJoints.find( ownerKey );
+	if ( it == m->nodeJoints.end() )
+	{
+		return;
+	}
+
+	for ( const Impl::NodeJoint& nj : it->second )
+	{
+		if ( B3_IS_NON_NULL( nj.id ) && b3Joint_IsValid( nj.id ) )
+		{
+			b3DestroyJoint( nj.id, true );
+			if ( m->liveJointCount > 0 )
+			{
+				--m->liveJointCount;
+			}
+		}
+	}
+	m->nodeJoints.erase( it );
+}
+
+bool SolverCore::getJointAnchors( uint32_t ownerKey, int jointIndex, float outA[3], float outB[3] ) const
+{
+	const Impl* m = myImpl;
+	auto it = m->nodeJoints.find( ownerKey );
+	if ( it == m->nodeJoints.end() )
+	{
+		return false;
+	}
+	if ( jointIndex < 0 || jointIndex >= (int)it->second.size() )
+	{
+		return false;
+	}
+
+	const Impl::NodeJoint& nj = it->second[(size_t)jointIndex];
+	if ( !B3_IS_NON_NULL( nj.id ) || !b3Joint_IsValid( nj.id ) )
+	{
+		return false;
+	}
+
+	b3Transform xfA = toLocalTransform( nj.bodyA );
+	b3Transform xfB = toLocalTransform( nj.bodyB );
+	b3Vec3 a = b3Add( b3RotateVector( xfA.q, nj.localA.p ), xfA.p );
+	b3Vec3 b = b3Add( b3RotateVector( xfB.q, nj.localB.p ), xfB.p );
+	outA[0] = a.x;
+	outA[1] = a.y;
+	outA[2] = a.z;
+	outB[0] = b.x;
+	outB[1] = b.y;
+	outB[2] = b.z;
+	return true;
 }
 
 int SolverCore::groupCount() const
@@ -462,17 +1177,28 @@ void SolverCore::advance( double dtSeconds, bool simulate )
 		m->rebuild();
 	}
 
+	if ( m->jointsDirty )
+	{
+		m->syncJoints();
+	}
+
 	if ( !simulate )
 	{
 		return;
 	}
 
-	m->accumulator += dtSeconds;
+	// Negative deltas (timeline scrubbed backwards) must not drain the
+	// accumulator, or the sim stalls until real time pays the debt back.
+	if ( dtSeconds > 0.0 )
+	{
+		m->accumulator += dtSeconds;
+	}
 	int maxSteps = m->settings.maxStepsPerCook > 0 ? m->settings.maxStepsPerCook : 1;
 
 	int steps = 0;
 	while ( m->accumulator >= kFixedTimeStep && steps < maxSteps )
 	{
+		m->retargetKinematicBodies();
 		b3World_Step( m->world, (float)kFixedTimeStep, m->settings.subSteps );
 		m->accumulator -= kFixedTimeStep;
 		++steps;
@@ -525,6 +1251,43 @@ int SolverCore::getGroupTransforms( uint32_t groupKey, BodyTransform* out, int c
 	{
 		const SpawnBody& d = group.defs[i];
 		out[i] = BodyTransform{ d.px, d.py, d.pz, d.qx, d.qy, d.qz, d.qw };
+	}
+	return count;
+}
+
+int SolverCore::getGroupStates( uint32_t groupKey, BodyState* out, int capacity ) const
+{
+	auto it = myImpl->groups.find( groupKey );
+	if ( it == myImpl->groups.end() )
+	{
+		return 0;
+	}
+
+	const Group& group = it->second;
+
+	if ( !group.bodies.empty() )
+	{
+		int count = (int)group.bodies.size() < capacity ? (int)group.bodies.size() : capacity;
+		for ( int i = 0; i < count; ++i )
+		{
+			b3BodyId bodyId = group.bodies[i];
+			b3Pos p = b3Body_GetPosition( bodyId );
+			b3Quat q = b3Body_GetRotation( bodyId );
+			b3Vec3 v = b3Body_GetLinearVelocity( bodyId );
+			b3Vec3 w = b3Body_GetAngularVelocity( bodyId );
+			out[i] = BodyState{ (float)p.x, (float)p.y, (float)p.z, q.v.x, q.v.y, q.v.z, q.s,
+								v.x,		v.y,		v.z,		w.x,   w.y,   w.z,
+								b3Body_IsAwake( bodyId ) ? 1.0f : 0.0f };
+		}
+		return count;
+	}
+
+	// Not built yet: spawn poses with zero velocities
+	int count = (int)group.defs.size() < capacity ? (int)group.defs.size() : capacity;
+	for ( int i = 0; i < count; ++i )
+	{
+		const SpawnBody& d = group.defs[i];
+		out[i] = BodyState{ d.px, d.py, d.pz, d.qx, d.qy, d.qz, d.qw, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
 	}
 	return count;
 }

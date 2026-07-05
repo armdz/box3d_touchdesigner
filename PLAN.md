@@ -221,9 +221,19 @@ re-crean el mundo si "Reset On Input Change" está activo (detección por `opId`
   On Input Change. El nodo de grupos se renombró a **Box3D Instances** (`Box3dinstances`).
   Familia de nodos actual: Solver CHOP (mundo) · Body SOP (actor individual) · Instances
   CHOP (masas para instancing).
-- **Fase 5 — Features**: joints entre actors, fuerzas/viento/explosiones desde CHOPs,
-  kinematic targets desde CHOPs, sensores, hulls convexos desde SOPs para dinámicos,
-  workerCount > 1, posible salida POP.
+- **Fase 5 — Features**: joints entre actors ✅ (**Box3D Joint CHOP**: uno o varios joints
+  por nodo — `Count` para series, `Pairs` para listas explícitas —,
+  distance/spherical/revolute/weld, bodies por path/nombre + índice; el pivote se
+  define en cada Body SOP con `Joint` / `Joint Pivot` o upstream con el **Set Joint SOP**;
+  salida CHOP `ax..bz active`; alternativa scriptable: Joints DAT en el Solver; resync
+  automático ante rebuilds — ver CLAUDE.md. El Joint SOP original se eliminó por
+  redundante), fuerzas/viento/explosiones desde CHOPs (pendiente),
+  kinematic targets ✅ (Box3D uses target transforms internally for kinematic bodies),
+  sensores, hulls convexos desde SOPs
+  para dinámicos, workerCount > 1 ✅
+  (`Workers`), posible salida POP. Canales extra de estado (velocidades/awake) ✅ en
+  Instances CHOP (toggle) e Info CHOP del Body SOP. Familia de nodos: Solver CHOP ·
+  Body SOP · Instances CHOP · Joint CHOP · Set Joint SOP.
 
 ## Layout del repo
 

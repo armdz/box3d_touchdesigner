@@ -27,13 +27,63 @@ After installing the DLLs, open TouchDesigner and check the example scene in
 
 | Node | Family | Role |
 |---|---|---|
-| **Box3D Solver** (`Box3dsolver`) | CHOP | Owns one world: gravity, sub-steps, optional ground plane, optional static container walls, optional static **Collision SOP** (triangle mesh). Steps the simulation once per frame. It does not spawn bodies; body nodes feed the world. Output channels are compatibility zeros. Includes a **Reset** pulse to force a full world rebuild. |
-| **Box3D Body** (`Box3dbody`) | SOP | ONE rigid body. Wire geometry in and pick a shape: **Input Hull** (convex hull of the input points), or Box/Sphere/Capsule. Output is the input geometry transformed by the simulation every frame — wire it straight to a render. Body transform also on its Info CHOP. For rigid upstream SOP animation (Translate/Rotate/Transform SOP), the body follows pose updates without rebuilding the whole world. Includes a **Reset** pulse to re-register this body cleanly. |
+| **Box3D Solver** (`Box3dsolver`) | CHOP | Owns one world: gravity, sub-steps, optional ground plane, optional static container walls, optional static **Collision SOP** (triangle mesh). Steps the simulation once per frame. It does not spawn bodies; body nodes feed the world. Output channels are compatibility zeros. Includes a **Reset** pulse to force a full world rebuild, and an **Allow Sleep** toggle — on by default, quiet bodies doze off to save CPU; turn it off to force every body to simulate every step (also wakes everything currently asleep). |
+| **Box3D Set Joint** (`Box3dsetjoint`) | SOP | Joint-anchor helper. Passes geometry through, lets you place an anchor visually (center/tips/custom), supports an `Anchor Color` preview, and writes `joint_enabled` + `joint_pivot` attributes on the SOP output. The pivot is also encoded relative to reference points of the geometry (`joint_ref` + `joint_ref_w`), so SOPs applied between Set Joint and the Body SOP (Transform, etc.) move the joint anchor together with the geometry. |
+| **Box3D Body** (`Box3dbody`) | SOP | ONE rigid body. Wire geometry in and pick a shape: **Input Hull** (convex hull of the input points), Box/Sphere/Capsule, or **Mesh (Static)** — the exact triangle mesh, concave geometry welcome (terrain, tubes, bowls), for Static/Kinematic bodies only (dynamic bodies must stay convex, an engine limit; a dynamic body with Mesh shape is treated as Static with a warning). Create as many static mesh bodies as you need. Includes a **Joint** toggle with a local **Joint Pivot** and an optional **Show Joint Pivot** preview marker, so you can define the body's joint point right on the body itself. Output is the input geometry transformed by the simulation every frame — wire it straight to a render. Body transform also on its Info CHOP. For rigid upstream SOP animation (Translate/Rotate/Transform SOP), the body follows pose updates without rebuilding the whole world. Includes a **Reset** pulse to re-register this body cleanly. |
 | **Box3D Instances** (`Box3dinstances`) | CHOP | A group of bodies for instancing: each point of its Spawn SOP spawns one body (per-point attributes below). Outputs `tx ty tz rx ry rz sx sy sz`, one sample per body — feed Geometry COMP instancing (RX/RY/RZ are degrees, TD rotate order XYZ; SX/SY/SZ are always positive, with a small safety clamp to avoid degenerate render scales). Includes a **Reset** pulse to re-register this group cleanly. |
+| **Box3D Joint CHOP** (`Box3djointchop`) | CHOP | The joint authoring node. Connects bodies by path/name plus index and uses the joint pivot stored on each Body SOP: set the pivot on the bodies, then connect Body A and Body B (leave Body B empty to pin Body A to the world). The **Joints** parameter enables up to 8 Body A/Body B pair rows on the Bodies page (Constant CHOP style), and **Count** turns each pair into an index series for chains. Outputs `ax ay az bx by bz active`, one sample per joint. |
 
 Body and Instances nodes bind to a solver through their **Solver** path parameter.
 Reading the solver creates the cook dependency, so TD always steps the world before the
 actors cook — no wires needed. All groups interact in the same world.
+
+When a Body SOP input contains custom attributes `joint_enabled` and/or `joint_pivot` (for example from **Box3D Set Joint**), the Body SOP uses those values automatically and treats the manual Joint controls as overridden. `joint_pivot` is interpreted in the input/object space and converted internally to body-local space. When the companion `joint_ref` / `joint_ref_w` attributes are present, the pivot is rebuilt from the current (transformed) point positions instead of the static `joint_pivot` value, so a Transform SOP between Set Joint and the Body carries the anchor along — translation, rotation and scale included.
+
+## Joint Parameters
+
+### Box3D Body joint settings
+
+| Parameter | What it does |
+|---|---|
+| **Joint** | Enables a local pivot for this body. When off, the body origin is used. |
+| **Joint Pivot** | Local body-space pivot position. This is the point the Joint node will use when Body A or Body B points to this body. |
+| **Show Joint Pivot** | Draws a small pivot marker in the Body SOP preview so you can see where the joint anchor is. |
+
+### Box3D Joint CHOP settings
+
+| Parameter | What it does |
+|---|---|
+| **Solver** | Box3D Solver CHOP that owns the world this joint belongs to. |
+| **Type** | Joint type: `distance`, `spherical`, `revolute`, or `weld`. |
+| **Joints** | How many Body A/Body B pair rows are active (1–8, on the Bodies page). Like the Constant CHOP: raise it for more rows, lower it to disable them. |
+| **Count (per pair)** | Turns each pair into a series of joints: joint *i* uses Index A + *i* (and Index B + *i* when Body B is set). Handy for chains over an Instances CHOP group. |
+| **Body A 1..8** | Path or node name of the first body owner node. Use the same name/path the Body SOP or Instances CHOP is registered with. |
+| **Index A 1..8** | Body index inside Body A's group. Use `0` for a single Body SOP. |
+| **Body B 1..8** | Path or node name of the second body owner node. Leave empty to anchor Body A to the world. |
+| **Index B 1..8** | Body index inside Body B's group. Use `0` for a single Body SOP. |
+| **Axis** | Joint frame axis in world space. For revolute this is the hinge axis; for spherical this is the cone axis. |
+| **Connected Bodies Collide** | Lets the two connected bodies keep colliding with each other. |
+| **Spring Hertz** | Spring stiffness in Hz. `0` disables spring behavior. |
+| **Spring Damping** | Spring damping ratio. |
+| **Auto Length (Distance)** | For distance joints, use the current separation as the joint length at creation time. |
+| **Length** | Distance joint target length when Auto Length is off. |
+| **Enable Limit** | Enables limits. For distance joints it uses min/max length; for revolute it uses angular limits. |
+| **Lower Angle (deg)** | Lower revolute or twist limit in degrees. |
+| **Upper Angle (deg)** | Upper revolute or twist limit in degrees. |
+| **Min Length** | Minimum distance limit when Enable Limit is on for a distance joint. |
+| **Max Length** | Maximum distance limit when Enable Limit is on for a distance joint. |
+| **Enable Cone Limit** | Enables the cone limit for spherical joints. |
+| **Cone Angle (deg)** | Cone angle for spherical joints. |
+| **Enable Motor** | Enables the motor on distance or revolute joints. |
+| **Motor Speed (deg/s | units/s)** | Motor speed. Revolute uses degrees per second, distance uses units per second. |
+| **Max Motor Torque / Force** | Maximum torque for revolute or force for distance joints. |
+
+Notes:
+
+- The Joint CHOP is intentionally simple: it only connects bodies. The pivot lives in the Body SOP.
+- Two-body joints are pivot-to-pivot: each body's own joint pivot is the constraint point, and the solver pulls the two pivots together when the joint is created. Bodies do not need to spawn aligned or touching — place the pivots where the joint should be and the sim snaps them together.
+- For two boxes joined at the tip, enable **Joint** on both Body SOPs, set the same **Joint Pivot** on both, and use a **Weld** or **Revolute** joint.
+- If Body B is empty, the joint anchors Body A to the world.
 
 ### Spawn SOP per-point attributes (all optional, float or int)
 
@@ -48,6 +98,7 @@ actors cook — no wires needed. All groups interact in the same world.
 | `friction` | 1 | Coulomb friction |
 | `restitution` | 1 | bounciness |
 | `type` | 1 | 0=static, 1=kinematic, 2=dynamic (default) |
+| `bullet` | 1 | 1 = continuous collision (CCD) for this fast-moving dynamic body |
 | `orient` | 4 | initial rotation quaternion x y z w |
 | `rx/ry/rz` | 1 each | initial rotation in degrees (used when `orient` is missing) |
 

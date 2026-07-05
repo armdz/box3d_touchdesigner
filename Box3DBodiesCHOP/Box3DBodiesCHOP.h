@@ -44,6 +44,9 @@ private:
 	void unregisterGroup();
 
 	const uint32_t myOpId;
+	// TD owns this and keeps opPath current; registered with the group so
+	// Joints DAT rows can reference this node by path or name.
+	const OP_NodeInfo* const myNodeInfo;
 
 	// solver binding + change tracking
 	uint32_t mySolverOpId = 0;
