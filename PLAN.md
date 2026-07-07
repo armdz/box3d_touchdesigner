@@ -240,10 +240,18 @@ re-crean el mundo si "Reset On Input Change" está activo (detección por `opId`
 ```
 box3d-touchdesigner/
   PLAN.md                  ← este documento
-  CMakeLists.txt           ← proyecto top-level del plugin (fija /MD, trae ../src)
-  sdk/                     ← headers del SDK de TD (CHOP, comunes)
-  Box3DSolverCHOP/         ← Fase 1: solver de juguete
-    Box3DSolverCHOP.h/.cpp
+  CLAUDE.md                ← estado vivo del proyecto (leer primero)
+  CMakeLists.txt           ← proyecto top-level (fija /MD, agrega box3d/src directo)
+  sdk/                     ← headers del SDK de TD (CHOP, SOP, comunes)
+  common/                  ← Box3DTDCore (DLL core compartida) + helpers header-only
+  Box3DSolverCHOP/         ← mundo/step/Collision SOP
+  Box3DBodySOP/            ← un body (hull/box/sphere/capsule/mesh/compound)
+  Box3DBodiesCHOP/         ← Instances CHOP (grupo de bodies para instancing)
+  Box3DJointCHOP/          ← joints (hasta 8 pares + series)
+  Box3DSetJointSOP/        ← pivote de joint como atributos en la cadena SOP
+  Box3DDebugSOP/           ← debug draw del mundo de colisión
+  TD-Examples/             ← escenas .toe de ejemplo
+  tox/                     ← COMP wrappers (WIP)
   build/                   ← build dir de CMake (no trackear)
   plugin/                  ← DLLs resultantes (copiar a Documentos/Derivative/Plugins)
 ```
@@ -255,11 +263,10 @@ cmake -B build
 cmake --build build --config Release
 ```
 
-Resultado: `plugin/Box3DSolverCHOP.dll`. Para instalarlo ejecutar
+Resultado: `plugin/Box3DCore.dll` + una DLL por operador. Para instalar ejecutar
 `install_plugin.bat` (copia las DLLs a
 `%USERPROFILE%/Documents/Derivative/Plugins`; TD debe estar cerrado porque bloquea la DLL
-cargada). Aparece como OP custom "Box3D Solver". Alternativa: apuntar un CPlusPlus CHOP a
-la DLL.
+cargada). `build_and_install.bat` hace build + install en un paso.
 
 ## Verificación en TD (Fase 1)
 

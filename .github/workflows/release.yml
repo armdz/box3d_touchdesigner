@@ -32,7 +32,8 @@ jobs:
             "plugin/Box3DBodySOP.dll",
             "plugin/Box3DBodiesCHOP.dll",
             "plugin/Box3DJointCHOP.dll",
-            "plugin/Box3DSetJointSOP.dll"
+            "plugin/Box3DSetJointSOP.dll",
+            "plugin/Box3DDebugSOP.dll"
           )
           $missing = $expected | Where-Object { -not (Test-Path $_) }
           if ($missing.Count -gt 0) {
@@ -95,6 +96,7 @@ jobs:
             "plugin/Box3DBodiesCHOP.plugin/Contents/MacOS/Box3DBodiesCHOP"
             "plugin/Box3DJointCHOP.plugin/Contents/MacOS/Box3DJointCHOP"
             "plugin/Box3DSetJointSOP.plugin/Contents/MacOS/Box3DSetJointSOP"
+            "plugin/Box3DDebugSOP.plugin/Contents/MacOS/Box3DDebugSOP"
           )
           missing=0
           for f in "${expected[@]}"; do

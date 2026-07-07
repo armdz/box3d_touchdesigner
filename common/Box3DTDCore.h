@@ -34,7 +34,9 @@ struct SpawnBody
 {
 	float px = 0.0f, py = 0.0f, pz = 0.0f;
 	float qx = 0.0f, qy = 0.0f, qz = 0.0f, qw = 1.0f;
-	int shape = 0; // 0 box, 1 sphere, 2 capsule, 3 convex hull, 4 triangle mesh (concave OK; static/kinematic only)
+	// 0 box, 1 sphere, 2 capsule, 3 convex hull, 4 triangle mesh (concave OK;
+	// static/kinematic only), 5 compound of convex hulls (concave OK, dynamic OK)
+	int shape = 0;
 	float sizeX = 1.0f, sizeY = 1.0f, sizeZ = 1.0f; // full sizes (primitive shapes)
 	float density = 1.0f;
 	float friction = 0.6f;
@@ -57,6 +59,12 @@ struct SpawnBody
 	// like terrain collides per-triangle. Dynamic bodies cannot use meshes
 	// (engine limit); the core falls back to a convex hull for them.
 	std::vector<int32_t> meshIndices;
+
+	// shape == 5 only: hullPoints is the concatenation of several pieces and
+	// this holds the point count of each piece. Each piece becomes one convex
+	// hull shape on the same body (industry-standard convex composition), so
+	// concave objects modeled in pieces can be fully dynamic.
+	std::vector<int32_t> hullPieceCounts;
 };
 
 struct BodyTransform
@@ -201,6 +209,19 @@ public:
 	int totalBodyCount() const;
 	int awakeBodyCount() const;
 	int64_t stepCount() const;
+
+	// Debug wireframe of the live collision world, read back from box3d itself
+	// (post hull simplification / post weld), in world space at the live body
+	// poses. Appends line segments (6 floats: x0 y0 z0 x1 y1 z1) plus one RGB
+	// color (3 floats) per segment. Colors: dynamic awake green, dynamic
+	// asleep blue, kinematic orange, static gray, world statics (ground/walls/
+	// collision mesh) dark gray, joints yellow. Empty until the world is built.
+	void getDebugWireframe( bool bodies, bool worldStatics, bool joints, std::vector<float>& segments,
+							std::vector<float>& colors ) const;
+
+	// Same wireframe but for one group's bodies only — used by the body
+	// nodes' Show Collision Shape toggle to draw their own collider inline.
+	void getGroupWireframe( uint32_t groupKey, std::vector<float>& segments, std::vector<float>& colors ) const;
 
 private:
 	friend class Registry;

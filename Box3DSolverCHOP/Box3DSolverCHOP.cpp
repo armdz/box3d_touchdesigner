@@ -1,5 +1,7 @@
 #include "Box3DSolverCHOP.h"
 
+#include "TDB3Mesh.h"
+
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -56,7 +58,8 @@ WorldSettings readWorldSettings( const OP_Inputs* inputs )
 	return s;
 }
 
-// Gather triangles from a SOP, fan-triangulating polygons
+// Gather triangles from a SOP, fan-triangulating polygons. Triangles are
+// oriented to face the geometry normals (box3d mesh contacts are one-sided).
 void extractTriangleSoup( const OP_SOPInput* sop, std::vector<float>& vertices, std::vector<int32_t>& indices )
 {
 	int pointCount = sop->getNumPoints();
@@ -70,23 +73,7 @@ void extractTriangleSoup( const OP_SOPInput* sop, std::vector<float>& vertices, 
 		vertices.push_back( points[i].z );
 	}
 
-	int primCount = sop->getNumPrimitives();
-	indices.reserve( primCount * 3 );
-	for ( int i = 0; i < primCount; ++i )
-	{
-		const SOP_PrimitiveInfo& prim = sop->getPrimitive( i );
-		if ( prim.type != PrimitiveType::Polygon || prim.numVertices < 3 )
-		{
-			continue;
-		}
-
-		for ( int v = 1; v < prim.numVertices - 1; ++v )
-		{
-			indices.push_back( prim.pointIndices[0] );
-			indices.push_back( prim.pointIndices[v] );
-			indices.push_back( prim.pointIndices[v + 1] );
-		}
-	}
+	extractOrientedTriangles( sop, indices );
 }
 
 } // namespace
@@ -109,6 +96,8 @@ void FillCHOPPluginInfo( CHOP_PluginInfo* info )
 
 	customInfo.minInputs = 0;
 	customInfo.maxInputs = 0;
+	// Kick-start cookEveryFrame on scene load (see getGeneralInfo).
+	customInfo.cookOnStart = true;
 }
 
 DLLEXPORT
@@ -136,8 +125,10 @@ Box3DSolverCHOP::~Box3DSolverCHOP()
 
 void Box3DSolverCHOP::getGeneralInfo( CHOP_GeneralInfo* ginfo, const OP_Inputs*, void* )
 {
-	// The simulation must advance every frame while its output is in use.
-	ginfo->cookEveryFrameIfAsked = true;
+	// The world is the clock of the whole system: it must step every frame
+	// regardless of what is being viewed. Bypassing the solver pauses the
+	// simulation (advance() stops being called).
+	ginfo->cookEveryFrame = true;
 	ginfo->timeslice = false;
 }
 

@@ -105,6 +105,10 @@ private:
 	int myInputPointCount = 0;
 	int myInputAnchor[3] = { 0, 0, 0 };
 	float myInputRefEdgeLen[3] = { 0.0f, 0.0f, 0.0f };
+	// Bounding-box diagonal of the cloud when the reference was captured;
+	// validated against the live cloud every cook so a collapsed/restored
+	// input (scale through zero) can never leave a stale hull cache behind.
+	float myInputRefDiag = 0.0f;
 	std::vector<float> myHullLocalPoints;
 
 	// last transform, for the Info CHOP

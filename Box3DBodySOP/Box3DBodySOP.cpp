@@ -1,6 +1,7 @@
 #include "Box3DBodySOP.h"
 
 #include "TDB3Common.h"
+#include "TDB3Mesh.h"
 
 #include "box3d/math_functions.h"
 
@@ -27,11 +28,12 @@ constexpr char JointrefAttrName[] = "joint_ref";
 constexpr char JointrefwAttrName[] = "joint_ref_w";
 constexpr char TypeName[] = "Type";
 constexpr char BulletccdName[] = "Bulletccd";
+constexpr char ShowcollisionName[] = "Showcollision";
 constexpr char DensityName[] = "Density";
 constexpr char FrictionName[] = "Friction";
 constexpr char RestitutionName[] = "Restitution";
 
-// Menu index (input hull, box, sphere, capsule, mesh) → core SpawnBody::shape
+// Menu index (input hull, box, sphere, capsule, mesh, compound) → core SpawnBody::shape
 int menuShapeToCoreShape( int menuShape )
 {
 	switch ( menuShape )
@@ -44,8 +46,31 @@ int menuShapeToCoreShape( int menuShape )
 			return 2; // capsule
 		case 4:
 			return 4; // exact triangle mesh (static/kinematic)
+		case 5:
+			return 5; // compound of hulls (concave OK, dynamic OK)
 		default:
 			return 3; // input hull
+	}
+}
+
+// Union-find over point indices; primitives weld their points into islands.
+int32_t findRoot( std::vector<int32_t>& parent, int32_t i )
+{
+	while ( parent[i] != i )
+	{
+		parent[i] = parent[parent[i]]; // path halving
+		i = parent[i];
+	}
+	return i;
+}
+
+void unionRoots( std::vector<int32_t>& parent, int32_t a, int32_t b )
+{
+	int32_t ra = findRoot( parent, a );
+	int32_t rb = findRoot( parent, b );
+	if ( ra != rb )
+	{
+		parent[rb] = ra;
 	}
 }
 
@@ -375,6 +400,36 @@ float edgeLength( const Position& a, const Position& b )
 	return sqrtf( dx * dx + dy * dy + dz * dz );
 }
 
+// Bounding-box diagonal of a point cloud; 0 for empty/degenerate input.
+float cloudDiagonal( const Position* points, int count )
+{
+	if ( points == nullptr || count <= 0 )
+	{
+		return 0.0f;
+	}
+	float minv[3] = { points[0].x, points[0].y, points[0].z };
+	float maxv[3] = { points[0].x, points[0].y, points[0].z };
+	for ( int i = 1; i < count; ++i )
+	{
+		if ( points[i].x < minv[0] )
+			minv[0] = points[i].x;
+		if ( points[i].x > maxv[0] )
+			maxv[0] = points[i].x;
+		if ( points[i].y < minv[1] )
+			minv[1] = points[i].y;
+		if ( points[i].y > maxv[1] )
+			maxv[1] = points[i].y;
+		if ( points[i].z < minv[2] )
+			minv[2] = points[i].z;
+		if ( points[i].z > maxv[2] )
+			maxv[2] = points[i].z;
+	}
+	float dx = maxv[0] - minv[0];
+	float dy = maxv[1] - minv[1];
+	float dz = maxv[2] - minv[2];
+	return sqrtf( dx * dx + dy * dy + dz * dz );
+}
+
 void setBoundsFromPoints( SOP_Output* output, const Position* points, int count )
 {
 	if ( output == nullptr || points == nullptr || count <= 0 )
@@ -427,6 +482,10 @@ void FillSOPPluginInfo( SOP_PluginInfo* info )
 
 	customInfo.minInputs = 0;
 	customInfo.maxInputs = 1;
+	// Required to kick-start cookEveryFrame on scene load: this node must
+	// cook to (re)register its body — existence in the physics world cannot
+	// depend on something watching the node.
+	customInfo.cookOnStart = true;
 }
 
 DLLEXPORT
@@ -467,8 +526,11 @@ void Box3DBodySOP::unregisterGroup()
 
 void Box3DBodySOP::getGeneralInfo( SOP_GeneralInfo* ginfo, const OP_Inputs*, void* )
 {
-	// Follows the simulation every frame while its output is in use.
-	ginfo->cookEveryFrameIfAsked = true;
+	// Cook unconditionally: this node's cook is what keeps its body
+	// registered (and its heartbeat alive) in the physics world, whether or
+	// not anything consumes the output. Bypassing the node stops its cooking
+	// and the solver drops the body after a few silent steps.
+	ginfo->cookEveryFrame = true;
 	ginfo->directToGPU = false;
 }
 
@@ -738,7 +800,26 @@ void Box3DBodySOP::execute( SOP_Output* output, const OP_Inputs* inputs, void* )
 	uint32_t sopId = input != nullptr ? input->opId : 0;
 	int64_t sopCooks = input != nullptr ? input->totalCooks : -1;
 
-	bool changed = !myGroupRegistered || settings != myLastSettings || sopId != mySopId ||
+	// Validate the cached hull reference against the LIVE cloud every cook,
+	// outside any cook-count gating: an input that collapsed (scale through
+	// zero/negative) and came back can otherwise leave the cache describing
+	// geometry that no longer exists, and the node stays stuck until the
+	// wire is re-connected. The diagonal is invariant under the rigid motion
+	// the cache is meant to survive, so this never fires on animation.
+	bool cacheInvalid = false;
+	if ( input != nullptr && myInputFrameValid )
+	{
+		float diag = cloudDiagonal( input->getPointPositions(), input->getNumPoints() );
+		float ref = myInputRefDiag;
+		float tolerance = 0.01f * ( ref > diag ? ref : diag ) + 1e-6f;
+		if ( fabsf( diag - ref ) > tolerance )
+		{
+			myInputFrameValid = false; // forces a reference rebuild below
+			cacheInvalid = true;
+		}
+	}
+
+	bool changed = !myGroupRegistered || cacheInvalid || settings != myLastSettings || sopId != mySopId ||
 				   ( input != nullptr && sopCooks != mySopCooks );
 
 	if ( changed )
@@ -823,6 +904,7 @@ void Box3DBodySOP::execute( SOP_Output* output, const OP_Inputs* inputs, void* )
 					{
 						myInputFrameValid = true;
 						myInputPointCount = pointCount;
+						myInputRefDiag = cloudDiagonal( points, pointCount );
 						myInputRefEdgeLen[0] = edgeLength( points[myInputAnchor[0]], points[myInputAnchor[1]] );
 						myInputRefEdgeLen[1] = edgeLength( points[myInputAnchor[0]], points[myInputAnchor[2]] );
 						myInputRefEdgeLen[2] = edgeLength( points[myInputAnchor[1]], points[myInputAnchor[2]] );
@@ -897,6 +979,52 @@ void Box3DBodySOP::execute( SOP_Output* output, const OP_Inputs* inputs, void* )
 					def.hullPoints.push_back( points[i].z - myCentroid[2] );
 				}
 
+				// Oriented triangulation: box3d mesh contacts are one-sided,
+				// so triangles must face the same way the geometry shades.
+				extractOrientedTriangles( input, def.meshIndices );
+
+				// Keep the box fallback sizes in sync with the geometry bounds
+				// in case the mesh cannot be built.
+				if ( def.hullPoints.size() >= 3 )
+				{
+					float minX = def.hullPoints[0], maxX = def.hullPoints[0];
+					float minY = def.hullPoints[1], maxY = def.hullPoints[1];
+					float minZ = def.hullPoints[2], maxZ = def.hullPoints[2];
+					for ( size_t i = 3; i + 2 < def.hullPoints.size(); i += 3 )
+					{
+						if ( def.hullPoints[i] < minX )
+							minX = def.hullPoints[i];
+						if ( def.hullPoints[i] > maxX )
+							maxX = def.hullPoints[i];
+						if ( def.hullPoints[i + 1] < minY )
+							minY = def.hullPoints[i + 1];
+						if ( def.hullPoints[i + 1] > maxY )
+							maxY = def.hullPoints[i + 1];
+						if ( def.hullPoints[i + 2] < minZ )
+							minZ = def.hullPoints[i + 2];
+						if ( def.hullPoints[i + 2] > maxZ )
+							maxZ = def.hullPoints[i + 2];
+					}
+
+					constexpr float kMinExtent = 0.001f;
+					def.sizeX = ( maxX - minX ) > kMinExtent ? ( maxX - minX ) : kMinExtent;
+					def.sizeY = ( maxY - minY ) > kMinExtent ? ( maxY - minY ) : kMinExtent;
+					def.sizeZ = ( maxZ - minZ ) > kMinExtent ? ( maxZ - minZ ) : kMinExtent;
+				}
+			}
+			else if ( def.shape == 5 )
+			{
+				// Compound: one convex hull per connectivity island of the
+				// input (points shared by primitives weld pieces together).
+				// Model concave objects in pieces — tube segments of a torus,
+				// legs of a chair — and the body can stay dynamic.
+				std::vector<int32_t> parent( pointCount );
+				for ( int i = 0; i < pointCount; ++i )
+				{
+					parent[i] = i;
+				}
+				std::vector<bool> used( pointCount, false );
+
 				int primCount = input->getNumPrimitives();
 				for ( int i = 0; i < primCount; ++i )
 				{
@@ -905,16 +1033,65 @@ void Box3DBodySOP::execute( SOP_Output* output, const OP_Inputs* inputs, void* )
 					{
 						continue;
 					}
-					for ( int v = 1; v < prim.numVertices - 1; ++v )
+					for ( int v = 0; v < prim.numVertices; ++v )
 					{
-						def.meshIndices.push_back( prim.pointIndices[0] );
-						def.meshIndices.push_back( prim.pointIndices[v] );
-						def.meshIndices.push_back( prim.pointIndices[v + 1] );
+						int32_t idx = prim.pointIndices[v];
+						if ( idx < 0 || idx >= pointCount )
+						{
+							continue;
+						}
+						used[idx] = true;
+						unionRoots( parent, prim.pointIndices[0], idx );
 					}
 				}
 
-				// Keep the box fallback sizes in sync with the geometry bounds
-				// in case the mesh cannot be built.
+				// Bucket points per island root, preserving discovery order.
+				std::vector<int32_t> islandOfRoot( pointCount, -1 );
+				std::vector<std::vector<int32_t>> islands;
+				for ( int i = 0; i < pointCount; ++i )
+				{
+					if ( !used[i] )
+					{
+						continue;
+					}
+					int32_t root = findRoot( parent, i );
+					if ( islandOfRoot[root] < 0 )
+					{
+						islandOfRoot[root] = (int32_t)islands.size();
+						islands.emplace_back();
+					}
+					islands[islandOfRoot[root]].push_back( i );
+				}
+
+				constexpr int kMaxPieces = 64;
+				if ( (int)islands.size() > kMaxPieces )
+				{
+					myWarning = "Compound: more than 64 connectivity islands; extra pieces merged into the last hull.";
+					for ( size_t k = kMaxPieces; k < islands.size(); ++k )
+					{
+						islands[kMaxPieces - 1].insert( islands[kMaxPieces - 1].end(), islands[k].begin(),
+														islands[k].end() );
+					}
+					islands.resize( kMaxPieces );
+				}
+
+				def.hullPoints.reserve( pointCount * 3 );
+				for ( const std::vector<int32_t>& island : islands )
+				{
+					if ( (int)island.size() < 4 )
+					{
+						continue; // degenerate piece, no volume
+					}
+					for ( int32_t idx : island )
+					{
+						def.hullPoints.push_back( points[idx].x - myCentroid[0] );
+						def.hullPoints.push_back( points[idx].y - myCentroid[1] );
+						def.hullPoints.push_back( points[idx].z - myCentroid[2] );
+					}
+					def.hullPieceCounts.push_back( (int32_t)island.size() );
+				}
+
+				// Fallback box sizes track the geometry bounds.
 				if ( def.hullPoints.size() >= 3 )
 				{
 					float minX = def.hullPoints[0], maxX = def.hullPoints[0];
@@ -1006,8 +1183,8 @@ void Box3DBodySOP::execute( SOP_Output* output, const OP_Inputs* inputs, void* )
 			def.py = settings.posY;
 			def.pz = settings.posZ;
 			int coreShape = menuShapeToCoreShape( settings.shape );
-			// Hull and mesh need input geometry; both preview as a box.
-			def.shape = ( coreShape == 3 || coreShape == 4 ) ? 0 : coreShape;
+			// Hull/mesh/compound need input geometry; all preview as a box.
+			def.shape = ( coreShape == 3 || coreShape == 4 || coreShape == 5 ) ? 0 : coreShape;
 		}
 
 		def.jointEnabled = settings.jointEnabled;
@@ -1077,6 +1254,30 @@ void Box3DBodySOP::execute( SOP_Output* output, const OP_Inputs* inputs, void* )
 	{
 		outputPrimitiveMesh( output, myLastSettings, t );
 	}
+
+	// Debug overlay: the REAL collider box3d is using for this body (hull
+	// after the vertex budget, mesh after welding), at the live pose, colored
+	// by state (dynamic awake green / asleep blue, kinematic orange, static
+	// gray). Appended to the output like the joint pivot marker.
+	if ( inputs->getParInt( ShowcollisionName ) != 0 )
+	{
+		std::vector<float> segments;
+		std::vector<float> colors;
+		core->getGroupWireframe( myOpId, segments, colors );
+		int segCount = (int)( segments.size() / 6 );
+		for ( int i = 0; i < segCount; ++i )
+		{
+			Position a( segments[i * 6 + 0], segments[i * 6 + 1], segments[i * 6 + 2] );
+			Position b( segments[i * 6 + 3], segments[i * 6 + 4], segments[i * 6 + 5] );
+			int32_t ia = output->addPoint( a );
+			int32_t ib = output->addPoint( b );
+			Color c( colors[i * 3 + 0], colors[i * 3 + 1], colors[i * 3 + 2], 1.0f );
+			output->setColor( c, ia );
+			output->setColor( c, ib );
+			const int32_t line[2] = { ia, ib };
+			output->addLine( line, 2 );
+		}
+	}
 }
 
 void Box3DBodySOP::outputTransformedInput( SOP_Output* output, const OP_SOPInput* input, const BodyTransform& t )
@@ -1094,6 +1295,15 @@ void Box3DBodySOP::outputTransformedInput( SOP_Output* output, const OP_SOPInput
 					  normalInfo->attribSet == AttribSet::Vertex && normalInfo->numNormals >= input->getNumVertices();
 	bool hasPrimitiveNormals = normalInfo != nullptr && normalInfo->normals != nullptr &&
 						 normalInfo->attribSet == AttribSet::Primitive && normalInfo->numNormals >= input->getNumPrimitives();
+
+	// Texture coordinates pass through untouched (only positions/normals
+	// rotate with the body).
+	const SOP_TextureInfo* texInfo = input->getTextures();
+	int texLayers = texInfo != nullptr ? texInfo->numTextureLayers : 0;
+	bool hasPointTex = texInfo != nullptr && texInfo->textures != nullptr && texLayers > 0 &&
+					   texInfo->attribSet == AttribSet::Point && texInfo->numTextures >= pointCount;
+	bool hasVertexTex = texInfo != nullptr && texInfo->textures != nullptr && texLayers > 0 &&
+						texInfo->attribSet == AttribSet::Vertex && texInfo->numTextures >= input->getNumVertices();
 
 	b3Matrix3 normalRot = r;
 	if ( useCachedLocalHull )
@@ -1118,9 +1328,10 @@ void Box3DBodySOP::outputTransformedInput( SOP_Output* output, const OP_SOPInput
 		}
 	};
 
-	// Vertex/primitive normals cannot be represented on shared points without
-	// smoothing artifacts. Expand points per primitive vertex to preserve them.
-	if ( hasVertexNormals || hasPrimitiveNormals )
+	// Vertex/primitive normals (and vertex texture coordinates) cannot be
+	// represented on shared points without smoothing/seam artifacts. Expand
+	// points per primitive vertex to preserve them.
+	if ( hasVertexNormals || hasPrimitiveNormals || hasVertexTex )
 	{
 		std::vector<Position> worldPoints;
 		worldPoints.reserve( input->getNumVertices() );
@@ -1147,19 +1358,32 @@ void Box3DBodySOP::outputTransformedInput( SOP_Output* output, const OP_SOPInput
 				int32_t outPointIndex = output->addPoint( p );
 				worldPoints.push_back( p );
 
-				Vector n;
 				if ( hasVertexNormals )
 				{
 					int normalIndex = prim.pointIndicesOffset + v;
 					const Vector& inN = normalInfo->normals[normalIndex];
-					n = rotateVector( normalRot, inN.x, inN.y, inN.z );
+					output->setNormal( rotateVector( normalRot, inN.x, inN.y, inN.z ), outPointIndex );
 				}
-				else
+				else if ( hasPrimitiveNormals )
 				{
 					const Vector& inN = normalInfo->normals[i];
-					n = rotateVector( normalRot, inN.x, inN.y, inN.z );
+					output->setNormal( rotateVector( normalRot, inN.x, inN.y, inN.z ), outPointIndex );
 				}
-				output->setNormal( n, outPointIndex );
+				else if ( hasPointNormals )
+				{
+					const Vector& inN = normalInfo->normals[srcPointIndex];
+					output->setNormal( rotateVector( normalRot, inN.x, inN.y, inN.z ), outPointIndex );
+				}
+
+				if ( hasVertexTex )
+				{
+					output->setTexCoord( &texInfo->textures[( prim.pointIndicesOffset + v ) * texLayers], texLayers,
+										 outPointIndex );
+				}
+				else if ( hasPointTex )
+				{
+					output->setTexCoord( &texInfo->textures[srcPointIndex * texLayers], texLayers, outPointIndex );
+				}
 				remapped.push_back( outPointIndex );
 			}
 
@@ -1214,6 +1438,11 @@ void Box3DBodySOP::outputTransformedInput( SOP_Output* output, const OP_SOPInput
 		}
 	}
 
+	if ( hasPointTex && pointCount > 0 )
+	{
+		output->setTexCoords( texInfo->textures, pointCount, texLayers, 0 );
+	}
+
 	int primCount = input->getNumPrimitives();
 	for ( int i = 0; i < primCount; ++i )
 	{
@@ -1234,9 +1463,9 @@ void Box3DBodySOP::outputPrimitiveMesh( SOP_Output* output, const BodySettings& 
 	b3Matrix3 r = rotationFromTransform( t );
 
 	int coreShape = menuShapeToCoreShape( s.shape );
-	if ( coreShape == 3 || coreShape == 4 )
+	if ( coreShape == 3 || coreShape == 4 || coreShape == 5 )
 	{
-		coreShape = 0; // no input: hull/mesh preview as a box
+		coreShape = 0; // no input: hull/mesh/compound preview as a box
 	}
 
 	if ( coreShape == 0 )
@@ -1381,6 +1610,9 @@ void Box3DBodySOP::setupParameters( OP_ParameterManager* manager, void* )
 		p.name = SolverName;
 		p.label = "Solver";
 		p.page = "Body";
+		// Auto-bind: a sibling solver with TD's default name resolves on
+		// creation (paths are relative to this node).
+		p.defaultValue = "box3dsolver1";
 		manager->appendCHOP( p );
 	}
 
@@ -1398,9 +1630,9 @@ void Box3DBodySOP::setupParameters( OP_ParameterManager* manager, void* )
 		p.label = "Shape";
 		p.page = "Body";
 		p.defaultValue = "inputhull";
-		const char* names[] = { "inputhull", "box", "sphere", "capsule", "mesh" };
-		const char* labels[] = { "Input Hull", "Box", "Sphere", "Capsule", "Mesh (Static)" };
-		manager->appendMenu( p, 5, names, labels );
+		const char* names[] = { "inputhull", "box", "sphere", "capsule", "mesh", "compound" };
+		const char* labels[] = { "Input Hull", "Box", "Sphere", "Capsule", "Mesh (Static)", "Compound (Hulls)" };
+		manager->appendMenu( p, 6, names, labels );
 	}
 
 	{
@@ -1419,11 +1651,14 @@ void Box3DBodySOP::setupParameters( OP_ParameterManager* manager, void* )
 		manager->appendXYZ( p );
 	}
 
+	// Joint pivot lives on its own page: it is only relevant when a Joint
+	// CHOP references this body, and it is overridden (and grayed out) by
+	// Set Joint SOP attributes coming in through the input.
 	{
 		OP_NumericParameter p;
 		p.name = JointName;
 		p.label = "Joint";
-		p.page = "Body";
+		p.page = "Joint";
 		p.defaultValues[0] = 0.0;
 		manager->appendToggle( p );
 	}
@@ -1432,7 +1667,7 @@ void Box3DBodySOP::setupParameters( OP_ParameterManager* manager, void* )
 		OP_NumericParameter p;
 		p.name = JointpivotName;
 		p.label = "Joint Pivot";
-		p.page = "Body";
+		p.page = "Joint";
 		for ( int i = 0; i < 3; ++i )
 		{
 			p.minSliders[i] = -10.0;
@@ -1445,7 +1680,7 @@ void Box3DBodySOP::setupParameters( OP_ParameterManager* manager, void* )
 		OP_NumericParameter p;
 		p.name = ShowjointpivotName;
 		p.label = "Show Joint Pivot";
-		p.page = "Body";
+		p.page = "Joint";
 		p.defaultValues[0] = 0.0;
 		manager->appendToggle( p );
 	}
@@ -1481,6 +1716,15 @@ void Box3DBodySOP::setupParameters( OP_ParameterManager* manager, void* )
 		OP_NumericParameter p;
 		p.name = BulletccdName;
 		p.label = "CCD (Bullet)";
+		p.page = "Body";
+		p.defaultValues[0] = 0.0;
+		manager->appendToggle( p );
+	}
+
+	{
+		OP_NumericParameter p;
+		p.name = ShowcollisionName;
+		p.label = "Show Collision Shape";
 		p.page = "Body";
 		p.defaultValues[0] = 0.0;
 		manager->appendToggle( p );

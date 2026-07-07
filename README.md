@@ -1,6 +1,24 @@
 # Box3D for TouchDesigner
 
-![Preview](preview.gif)
+## Example gallery
+
+### Custom Mesh Collider (`TD-Examples/Custom_Mesh_Collider.toe`)
+![Custom Mesh Collider](gif/Custom_Mesh_Collider.gif)
+
+### Custom Size Instances (`TD-Examples/Custom_Size_Instances.toe`)
+![Custom Size Instances](gif/Custom_Size_Instances.gif)
+
+### Instances (`TD-Examples/Instances.toe`)
+![Instances](gif/Instances.gif)
+
+### Instances and Dynamic (`TD-Examples/Instances_and_Dynamic.toe`)
+![Instances and Dynamic](gif/Instances_and_Dynamic.gif)
+
+### Joint (`TD-Examples/Joint.toe`)
+![Joint](gif/Joints.gif)
+
+### Restitution (`TD-Examples/Restitution.toe`)
+![Restitution](gif/Restitution.gif)
 
 Native TouchDesigner custom operators exposing [Box3D](https://box2d.org) — Erin Catto's
 3D rigid-body physics engine — inside TD, modeled after the workflow of TD's built-in
@@ -17,8 +35,8 @@ and copy the DLLs to:
 
 `%USERPROFILE%\Documents\Derivative\Plugins`
 
-After installing the DLLs, open TouchDesigner and check the example scene in
-`TD-Examples/Sample.toe`.
+After installing the DLLs, open TouchDesigner and try one of the example scenes in
+`TD-Examples/`.
 
 > Agent/contributor context, design decisions and the phase roadmap live in
 > [PLAN.md](PLAN.md) (Spanish). Read it before changing this folder.
@@ -29,13 +47,21 @@ After installing the DLLs, open TouchDesigner and check the example scene in
 |---|---|---|
 | **Box3D Solver** (`Box3dsolver`) | CHOP | Owns one world: gravity, sub-steps, optional ground plane, optional static container walls, optional static **Collision SOP** (triangle mesh). Steps the simulation once per frame. It does not spawn bodies; body nodes feed the world. Output channels are compatibility zeros. Includes a **Reset** pulse to force a full world rebuild, and an **Allow Sleep** toggle — on by default, quiet bodies doze off to save CPU; turn it off to force every body to simulate every step (also wakes everything currently asleep). |
 | **Box3D Set Joint** (`Box3dsetjoint`) | SOP | Joint-anchor helper. Passes geometry through, lets you place an anchor visually (center/tips/custom), supports an `Anchor Color` preview, and writes `joint_enabled` + `joint_pivot` attributes on the SOP output. The pivot is also encoded relative to reference points of the geometry (`joint_ref` + `joint_ref_w`), so SOPs applied between Set Joint and the Body SOP (Transform, etc.) move the joint anchor together with the geometry. |
-| **Box3D Body** (`Box3dbody`) | SOP | ONE rigid body. Wire geometry in and pick a shape: **Input Hull** (convex hull of the input points), Box/Sphere/Capsule, or **Mesh (Static)** — the exact triangle mesh, concave geometry welcome (terrain, tubes, bowls), for Static/Kinematic bodies only (dynamic bodies must stay convex, an engine limit; a dynamic body with Mesh shape is treated as Static with a warning). Create as many static mesh bodies as you need. Includes a **Joint** toggle with a local **Joint Pivot** and an optional **Show Joint Pivot** preview marker, so you can define the body's joint point right on the body itself. Output is the input geometry transformed by the simulation every frame — wire it straight to a render. Body transform also on its Info CHOP. For rigid upstream SOP animation (Translate/Rotate/Transform SOP), the body follows pose updates without rebuilding the whole world. Includes a **Reset** pulse to re-register this body cleanly. |
-| **Box3D Instances** (`Box3dinstances`) | CHOP | A group of bodies for instancing: each point of its Spawn SOP spawns one body (per-point attributes below). Outputs `tx ty tz rx ry rz sx sy sz`, one sample per body — feed Geometry COMP instancing (RX/RY/RZ are degrees, TD rotate order XYZ; SX/SY/SZ are always positive, with a small safety clamp to avoid degenerate render scales). Includes a **Reset** pulse to re-register this group cleanly. |
+| **Box3D Body** (`Box3dbody`) | SOP | ONE rigid body. Wire geometry in and pick a shape: **Input Hull** (convex hull of the input points), Box/Sphere/Capsule, or **Mesh (Static)** — the exact triangle mesh, concave geometry welcome (terrain, tubes, bowls), for Static/Kinematic bodies only (dynamic bodies must stay convex, an engine limit; a dynamic body with Mesh shape is treated as Static with a warning). Create as many static mesh bodies as you need. Any polygon input works (quads are fan-triangulated), and mesh collision is one-sided: the side the geometry's normals shade toward is the side that collides — flip your normals (Reverse SOP) to make an inside-out container. **Compound (Hulls)** builds one convex hull per connectivity island of the input on a single body — model a concave object in pieces (tube segments, chair legs) and it CAN be dynamic, with mass and inertia from all pieces. Includes a **Joint** toggle with a local **Joint Pivot** and an optional **Show Joint Pivot** preview marker, so you can define the body's joint point right on the body itself. A **Show Collision Shape** toggle overlays the body's REAL collider (hull after simplification, mesh after welding) as colored wireframe lines right in the node's output. Output is the input geometry transformed by the simulation every frame — wire it straight to a render. Body transform also on its Info CHOP. For rigid upstream SOP animation (Translate/Rotate/Transform SOP), the body follows pose updates without rebuilding the whole world. Includes a **Reset** pulse to re-register this body cleanly. |
+| **Box3D Instances** (`Box3dinstances`) | CHOP | A group of bodies for instancing: each point of its Spawn SOP spawns one body (per-point attributes below). The point count can change live — bodies already simulating keep their state, new points spawn new bodies, removed points remove theirs (body identity is the point index: keep point order stable and append new points at the end). Outputs `tx ty tz rx ry rz sx sy sz`, one sample per body — feed Geometry COMP instancing (RX/RY/RZ are degrees, TD rotate order XYZ; SX/SY/SZ are always positive, with a small safety clamp to avoid degenerate render scales). Includes a **Reset** pulse to re-register this group cleanly. |
+| **Box3D Debug** (`Box3ddebug`) | SOP | Debug draw of the live collision world (Bullet-style). Outputs the REAL shapes box3d collides with — hulls after the 64-vertex simplification, meshes after welding — as world-space wireframe lines at the live body poses, colored by state: dynamic awake green, asleep blue, kinematic orange, static gray, ground/walls/collision mesh dark gray, joints yellow. Toggles for Bodies / World Collision / Joints. Use it standalone with Display ON and Render OFF: visible in the viewport, absent from Render TOPs. |
 | **Box3D Joint CHOP** (`Box3djointchop`) | CHOP | The joint authoring node. Connects bodies by path/name plus index and uses the joint pivot stored on each Body SOP: set the pivot on the bodies, then connect Body A and Body B (leave Body B empty to pin Body A to the world). The **Joints** parameter enables up to 8 Body A/Body B pair rows on the Bodies page (Constant CHOP style), and **Count** turns each pair into an index series for chains. Outputs `ax ay az bx by bz active`, one sample per joint. |
 
 Body and Instances nodes bind to a solver through their **Solver** path parameter.
 Reading the solver creates the cook dependency, so TD always steps the world before the
-actors cook — no wires needed. All groups interact in the same world.
+actors cook — no wires needed. All groups interact in the same world. The parameter
+defaults to `box3dsolver1`, so nodes created next to a solver with TD's default name
+bind automatically; rename or point it elsewhere for multiple worlds.
+
+Solver, Body, Instances and Joint nodes cook every frame on their own (no viewer or
+wire needed) — a body exists in the world because its node cooks. **Bypassing a node
+removes its bodies/joints from the simulation within a few frames**, and un-bypassing
+respawns them; bypassing the Solver pauses the whole world.
 
 When a Body SOP input contains custom attributes `joint_enabled` and/or `joint_pivot` (for example from **Box3D Set Joint**), the Body SOP uses those values automatically and treats the manual Joint controls as overridden. `joint_pivot` is interpreted in the input/object space and converted internally to body-local space. When the companion `joint_ref` / `joint_ref_w` attributes are present, the pivot is rebuilt from the current (transformed) point positions instead of the static `joint_pivot` value, so a Transform SOP between Set Joint and the Body carries the anchor along — translation, rotation and scale included.
 
@@ -181,7 +207,7 @@ warning — codesigning/notarizing is out of scope here but something to add bef
 public macOS release.
 
 Reopen TD and the operators appear in the OP Create dialog (Custom family). You can then
-open `TD-Examples/Sample.toe` to see a ready-to-run example setup.
+open one of the example scenes in `TD-Examples/` to see a ready-to-run setup.
 
 ## Quick start
 
@@ -220,7 +246,7 @@ repo root
   sdk/                   TouchDesigner CPlusPlus SDK headers (Derivative Shared Use License)
   install_plugin.bat     Windows: copies built DLLs into the TD Plugins folder
   install_plugin.sh      macOS: copies built .plugin bundles + dylib into the TD Plugins folder
-  TD-Examples/           TouchDesigner example files (Sample.toe)
+  TD-Examples/           TouchDesigner example files and demo scenes
   build/                 CMake build dir (gitignored)
   plugin/                built plugin binaries (gitignored)
 ```

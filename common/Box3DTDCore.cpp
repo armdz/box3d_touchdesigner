@@ -24,6 +24,9 @@ struct Group
 	// copy) b3MeshData, so these must outlive the bodies/shapes using them
 	// and be destroyed together with them.
 	std::vector<b3MeshData*> meshes;
+
+	// advance() counter value of the owner node's last cook (heartbeat).
+	uint64_t lastTouch = 0;
 };
 
 bool sameJointSpec( const JointSpec& a, const JointSpec& b )
@@ -96,6 +99,234 @@ b3Transform toLocalTransform( b3BodyId bodyId )
 	return t;
 }
 
+// ---- debug wireframe helpers ----
+
+b3Vec3 debugTransformPoint( const b3Transform& xf, const b3Vec3& p )
+{
+	return b3Add( xf.p, b3RotateVector( xf.q, p ) );
+}
+
+void debugPushSegment( std::vector<float>& segments, std::vector<float>& colors, const float rgb[3], const b3Vec3& a,
+					   const b3Vec3& b )
+{
+	segments.push_back( a.x );
+	segments.push_back( a.y );
+	segments.push_back( a.z );
+	segments.push_back( b.x );
+	segments.push_back( b.y );
+	segments.push_back( b.z );
+	colors.push_back( rgb[0] );
+	colors.push_back( rgb[1] );
+	colors.push_back( rgb[2] );
+}
+
+// Any two unit vectors perpendicular to axis (and each other).
+void debugBasisFromAxis( const b3Vec3& axis, b3Vec3& u, b3Vec3& v )
+{
+	b3Vec3 ref = fabsf( axis.y ) < 0.9f ? b3Vec3{ 0.0f, 1.0f, 0.0f } : b3Vec3{ 1.0f, 0.0f, 0.0f };
+	u = b3Vec3{ axis.y * ref.z - axis.z * ref.y, axis.z * ref.x - axis.x * ref.z, axis.x * ref.y - axis.y * ref.x };
+	float len = sqrtf( u.x * u.x + u.y * u.y + u.z * u.z );
+	if ( len < 1e-8f )
+	{
+		u = b3Vec3{ 1.0f, 0.0f, 0.0f };
+	}
+	else
+	{
+		u.x /= len;
+		u.y /= len;
+		u.z /= len;
+	}
+	v = b3Vec3{ axis.y * u.z - axis.z * u.y, axis.z * u.x - axis.x * u.z, axis.x * u.y - axis.y * u.x };
+}
+
+// Circle of radius r around `center` in the plane spanned by u/v (local
+// space), transformed to world.
+void debugAppendCircle( std::vector<float>& segments, std::vector<float>& colors, const float rgb[3],
+						const b3Transform& xf, const b3Vec3& center, const b3Vec3& u, const b3Vec3& v, float r )
+{
+	constexpr int kSegments = 16;
+	constexpr float kTau = 6.28318530717958647692f;
+	b3Vec3 prev = debugTransformPoint(
+		xf, b3Vec3{ center.x + r * u.x, center.y + r * u.y, center.z + r * u.z } );
+	for ( int i = 1; i <= kSegments; ++i )
+	{
+		float a = kTau * (float)i / (float)kSegments;
+		float c = cosf( a );
+		float s = sinf( a );
+		b3Vec3 p = debugTransformPoint( xf, b3Vec3{ center.x + r * ( c * u.x + s * v.x ),
+													center.y + r * ( c * u.y + s * v.y ),
+													center.z + r * ( c * u.z + s * v.z ) } );
+		debugPushSegment( segments, colors, rgb, prev, p );
+		prev = p;
+	}
+}
+
+// The wireframe of ONE live shape, exactly as box3d stores it (hulls after
+// the vertex-budget simplification, meshes after welding).
+void debugAppendShape( std::vector<float>& segments, std::vector<float>& colors, const float rgb[3],
+					   const b3Transform& xf, b3ShapeId shapeId )
+{
+	switch ( b3Shape_GetType( shapeId ) )
+	{
+		case b3_sphereShape:
+		{
+			b3Sphere s = b3Shape_GetSphere( shapeId );
+			debugAppendCircle( segments, colors, rgb, xf, s.center, b3Vec3{ 1, 0, 0 }, b3Vec3{ 0, 1, 0 }, s.radius );
+			debugAppendCircle( segments, colors, rgb, xf, s.center, b3Vec3{ 0, 1, 0 }, b3Vec3{ 0, 0, 1 }, s.radius );
+			debugAppendCircle( segments, colors, rgb, xf, s.center, b3Vec3{ 0, 0, 1 }, b3Vec3{ 1, 0, 0 }, s.radius );
+			break;
+		}
+		case b3_capsuleShape:
+		{
+			b3Capsule c = b3Shape_GetCapsule( shapeId );
+			b3Vec3 axis = b3Vec3{ c.center2.x - c.center1.x, c.center2.y - c.center1.y, c.center2.z - c.center1.z };
+			float len = sqrtf( axis.x * axis.x + axis.y * axis.y + axis.z * axis.z );
+			if ( len > 1e-8f )
+			{
+				axis.x /= len;
+				axis.y /= len;
+				axis.z /= len;
+			}
+			else
+			{
+				axis = b3Vec3{ 0.0f, 1.0f, 0.0f };
+			}
+			b3Vec3 u, v;
+			debugBasisFromAxis( axis, u, v );
+			debugAppendCircle( segments, colors, rgb, xf, c.center1, u, v, c.radius );
+			debugAppendCircle( segments, colors, rgb, xf, c.center2, u, v, c.radius );
+			const b3Vec3 dirs[4] = { u, b3Vec3{ -u.x, -u.y, -u.z }, v, b3Vec3{ -v.x, -v.y, -v.z } };
+			for ( const b3Vec3& d : dirs )
+			{
+				b3Vec3 a = debugTransformPoint( xf, b3Vec3{ c.center1.x + c.radius * d.x, c.center1.y + c.radius * d.y,
+															c.center1.z + c.radius * d.z } );
+				b3Vec3 b = debugTransformPoint( xf, b3Vec3{ c.center2.x + c.radius * d.x, c.center2.y + c.radius * d.y,
+															c.center2.z + c.radius * d.z } );
+				debugPushSegment( segments, colors, rgb, a, b );
+			}
+			// Axis caps so the hemispheres read in the wireframe.
+			b3Vec3 tip1 = debugTransformPoint( xf, b3Vec3{ c.center1.x - c.radius * axis.x,
+														   c.center1.y - c.radius * axis.y,
+														   c.center1.z - c.radius * axis.z } );
+			b3Vec3 tip2 = debugTransformPoint( xf, b3Vec3{ c.center2.x + c.radius * axis.x,
+														   c.center2.y + c.radius * axis.y,
+														   c.center2.z + c.radius * axis.z } );
+			b3Vec3 e1 = debugTransformPoint( xf, c.center1 );
+			b3Vec3 e2 = debugTransformPoint( xf, c.center2 );
+			debugPushSegment( segments, colors, rgb, e1, tip1 );
+			debugPushSegment( segments, colors, rgb, e2, tip2 );
+			break;
+		}
+		case b3_hullShape:
+		{
+			const b3HullData* hull = b3Shape_GetHull( shapeId );
+			if ( hull == nullptr )
+			{
+				break;
+			}
+			const b3Vec3* points = b3GetHullPoints( hull );
+			const b3HullHalfEdge* edges = b3GetHullEdges( hull );
+			if ( points == nullptr || edges == nullptr )
+			{
+				break;
+			}
+			for ( int e = 0; e < hull->edgeCount; ++e )
+			{
+				// Each edge is two half-edges; draw it once.
+				if ( e < (int)edges[e].twin )
+				{
+					const b3Vec3& a = points[edges[e].origin];
+					const b3Vec3& b = points[edges[edges[e].twin].origin];
+					debugPushSegment( segments, colors, rgb, debugTransformPoint( xf, a ),
+									  debugTransformPoint( xf, b ) );
+				}
+			}
+			break;
+		}
+		case b3_meshShape:
+		{
+			b3Mesh mesh = b3Shape_GetMesh( shapeId );
+			if ( mesh.data == nullptr )
+			{
+				break;
+			}
+			const b3Vec3* verts = b3GetMeshVertices( mesh.data );
+			const b3MeshTriangle* tris = b3GetMeshTriangles( mesh.data );
+			if ( verts == nullptr || tris == nullptr )
+			{
+				break;
+			}
+			auto scaled = [&]( int32_t i ) {
+				return b3Vec3{ verts[i].x * mesh.scale.x, verts[i].y * mesh.scale.y, verts[i].z * mesh.scale.z };
+			};
+			for ( int t = 0; t < mesh.data->triangleCount; ++t )
+			{
+				b3Vec3 a = debugTransformPoint( xf, scaled( tris[t].index1 ) );
+				b3Vec3 b = debugTransformPoint( xf, scaled( tris[t].index2 ) );
+				b3Vec3 c = debugTransformPoint( xf, scaled( tris[t].index3 ) );
+				// Shared edges are drawn once via the index-order filter; a
+				// boundary edge with descending indices still needs drawing,
+				// but our meshes are welded closed surfaces, so accept the
+				// (rare) missing open edge over doubling every interior one.
+				if ( tris[t].index1 < tris[t].index2 )
+					debugPushSegment( segments, colors, rgb, a, b );
+				if ( tris[t].index2 < tris[t].index3 )
+					debugPushSegment( segments, colors, rgb, b, c );
+				if ( tris[t].index3 < tris[t].index1 )
+					debugPushSegment( segments, colors, rgb, c, a );
+			}
+			break;
+		}
+		default:
+			break;
+	}
+}
+
+void debugAppendBody( std::vector<float>& segments, std::vector<float>& colors, const float rgb[3], b3BodyId bodyId )
+{
+	if ( !B3_IS_NON_NULL( bodyId ) )
+	{
+		return;
+	}
+	b3Transform xf = toLocalTransform( bodyId );
+	// 64 covers compound bodies (one shape per piece).
+	b3ShapeId shapes[64];
+	int count = b3Body_GetShapes( bodyId, shapes, 64 );
+	for ( int s = 0; s < count; ++s )
+	{
+		debugAppendShape( segments, colors, rgb, xf, shapes[s] );
+	}
+}
+
+constexpr float kDebugStaticColor[3] = { 0.55f, 0.55f, 0.6f };
+constexpr float kDebugKinematicColor[3] = { 1.0f, 0.55f, 0.1f };
+constexpr float kDebugAwakeColor[3] = { 0.25f, 0.95f, 0.35f };
+constexpr float kDebugAsleepColor[3] = { 0.25f, 0.45f, 1.0f };
+
+// One group's bodies, colored by type/state.
+void debugAppendGroup( std::vector<float>& segments, std::vector<float>& colors, const Group& group )
+{
+	for ( size_t i = 0; i < group.bodies.size(); ++i )
+	{
+		b3BodyId bodyId = group.bodies[i];
+		if ( !B3_IS_NON_NULL( bodyId ) )
+		{
+			continue;
+		}
+		int type = i < group.defs.size() ? group.defs[i].type : 2;
+		const float* rgb = kDebugStaticColor;
+		if ( type == 1 )
+		{
+			rgb = kDebugKinematicColor;
+		}
+		else if ( type == 2 )
+		{
+			rgb = b3Body_IsAwake( bodyId ) ? kDebugAwakeColor : kDebugAsleepColor;
+		}
+		debugAppendBody( segments, colors, rgb, bodyId );
+	}
+}
+
 bool sameShapeAndType( const SpawnBody& a, const SpawnBody& b )
 {
 	if ( a.shape != b.shape || a.sizeX != b.sizeX || a.sizeY != b.sizeY || a.sizeZ != b.sizeZ || a.type != b.type ||
@@ -125,6 +356,19 @@ bool sameShapeAndType( const SpawnBody& a, const SpawnBody& b )
 	for ( size_t i = 0; i < a.meshIndices.size(); ++i )
 	{
 		if ( a.meshIndices[i] != b.meshIndices[i] )
+		{
+			return false;
+		}
+	}
+
+	if ( a.hullPieceCounts.size() != b.hullPieceCounts.size() )
+	{
+		return false;
+	}
+
+	for ( size_t i = 0; i < a.hullPieceCounts.size(); ++i )
+	{
+		if ( a.hullPieceCounts[i] != b.hullPieceCounts[i] )
 		{
 			return false;
 		}
@@ -173,6 +417,12 @@ void setBodyTransformFromDef( b3BodyId bodyId, const SpawnBody& def )
 {
 	b3Quat q = quatFromDef( def );
 
+	// NaN spawn poses (degenerate upstream geometry) must never reach the
+	// world; a poisoned static/kinematic transform corrupts every contact.
+	float px = std::isfinite( def.px ) ? def.px : 0.0f;
+	float py = std::isfinite( def.py ) ? def.py : 0.0f;
+	float pz = std::isfinite( def.pz ) ? def.pz : 0.0f;
+
 	if ( def.type == 1 )
 	{
 		// Kinematic bodies should be driven by a target transform so Box3D can
@@ -180,13 +430,13 @@ void setBodyTransformFromDef( b3BodyId bodyId, const SpawnBody& def )
 		// advance() re-targets them before every step, so the velocity decays
 		// to zero once the target is reached instead of persisting forever.
 		b3WorldTransform target = b3WorldTransform_identity;
-		target.p = b3Pos{ def.px, def.py, def.pz };
+		target.p = b3Pos{ px, py, pz };
 		target.q = q;
 		b3Body_SetTargetTransform( bodyId, target, (float)kFixedTimeStep, true );
 	}
 	else
 	{
-		b3Body_SetTransform( bodyId, b3Pos{ def.px, def.py, def.pz }, q );
+		b3Body_SetTransform( bodyId, b3Pos{ px, py, pz }, q );
 		b3Body_SetAwake( bodyId, true );
 	}
 }
@@ -195,15 +445,25 @@ void setBodyTransformFromDef( b3BodyId bodyId, const SpawnBody& def )
 // box3d lets friction/restitution/density change on existing shapes.
 void applyMaterialToBody( b3BodyId bodyId, const SpawnBody& def )
 {
-	b3ShapeId shapes[8];
-	int count = b3Body_GetShapes( bodyId, shapes, 8 );
+	float density = std::isfinite( def.density ) && def.density > 0.0f ? def.density : 0.0f;
+	float friction = std::isfinite( def.friction ) && def.friction > 0.0f ? def.friction : 0.0f;
+	float restitution = std::isfinite( def.restitution ) && def.restitution > 0.0f ? def.restitution : 0.0f;
+
+	// 64 covers compound bodies (one shape per piece).
+	b3ShapeId shapes[64];
+	int count = b3Body_GetShapes( bodyId, shapes, 64 );
 	for ( int s = 0; s < count; ++s )
 	{
-		b3Shape_SetFriction( shapes[s], def.friction );
-		b3Shape_SetRestitution( shapes[s], def.restitution );
-		b3Shape_SetDensity( shapes[s], def.density, false );
+		b3Shape_SetFriction( shapes[s], friction );
+		b3Shape_SetRestitution( shapes[s], restitution );
+		b3Shape_SetDensity( shapes[s], density, false );
 	}
 	b3Body_ApplyMassFromShapes( bodyId );
+}
+
+inline float finiteOr( float v, float fallback )
+{
+	return std::isfinite( v ) ? v : fallback;
 }
 
 void createBodyFromDef( b3WorldId world, const SpawnBody& def, std::vector<b3BodyId>& outBodies,
@@ -211,27 +471,39 @@ void createBodyFromDef( b3WorldId world, const SpawnBody& def, std::vector<b3Bod
 {
 	b3BodyDef bodyDef = b3DefaultBodyDef();
 	bodyDef.type = def.type == 0 ? b3_staticBody : ( def.type == 1 ? b3_kinematicBody : b3_dynamicBody );
-	bodyDef.position = b3Pos{ def.px, def.py, def.pz };
+	// Spawn data can come from arbitrary per-point attributes (noise,
+	// divisions by zero upstream). A single NaN position poisons the whole
+	// island/world and never heals, so sanitize here — the one choke point
+	// every body goes through.
+	bodyDef.position = b3Pos{ finiteOr( def.px, 0.0f ), finiteOr( def.py, 0.0f ), finiteOr( def.pz, 0.0f ) };
 	bodyDef.isBullet = def.bullet && bodyDef.type == b3_dynamicBody;
 
-	float lengthSq = def.qx * def.qx + def.qy * def.qy + def.qz * def.qz + def.qw * def.qw;
-	if ( lengthSq > 0.0001f )
+	float qx = finiteOr( def.qx, 0.0f );
+	float qy = finiteOr( def.qy, 0.0f );
+	float qz = finiteOr( def.qz, 0.0f );
+	float qw = finiteOr( def.qw, 1.0f );
+	float lengthSq = qx * qx + qy * qy + qz * qz + qw * qw;
+	if ( lengthSq > 0.0001f && std::isfinite( lengthSq ) )
 	{
 		float inv = 1.0f / sqrtf( lengthSq );
 		b3Quat q;
-		q.v.x = def.qx * inv;
-		q.v.y = def.qy * inv;
-		q.v.z = def.qz * inv;
-		q.s = def.qw * inv;
+		q.v.x = qx * inv;
+		q.v.y = qy * inv;
+		q.v.z = qz * inv;
+		q.s = qw * inv;
 		bodyDef.rotation = q;
 	}
 
 	b3BodyId bodyId = b3CreateBody( world, &bodyDef );
 
 	b3ShapeDef shapeDef = b3DefaultShapeDef();
-	shapeDef.density = def.density;
-	shapeDef.baseMaterial.friction = def.friction;
-	shapeDef.baseMaterial.restitution = def.restitution;
+	// Attribute-driven materials bypass the parameter clamps; keep them sane.
+	float density = finiteOr( def.density, 1.0f );
+	float friction = finiteOr( def.friction, 0.6f );
+	float restitution = finiteOr( def.restitution, 0.0f );
+	shapeDef.density = density > 0.0f ? density : 0.0f;
+	shapeDef.baseMaterial.friction = friction > 0.0f ? friction : 0.0f;
+	shapeDef.baseMaterial.restitution = restitution > 0.0f ? restitution : 0.0f;
 
 	// Sizes are full extents; box3d primitives want half extents and radii.
 	constexpr float kMinSize = 0.001f;
@@ -274,6 +546,38 @@ void createBodyFromDef( b3WorldId world, const SpawnBody& def, std::vector<b3Bod
 			half = half > 0.0f ? half : 0.001f;
 			b3Capsule capsule = { { 0.0f, -half, 0.0f }, { 0.0f, half, 0.0f }, radius };
 			b3CreateCapsuleShape( bodyId, &shapeDef, &capsule );
+			break;
+		}
+		case 5: // compound: one convex hull shape per piece on the same body.
+		{
+			// Multiple shapes on one body is box3d's native composition: mass
+			// and inertia come from all pieces, so concave objects modeled in
+			// convex-ish parts can be fully dynamic.
+			bool any = false;
+			int offset = 0;
+			for ( int32_t count : def.hullPieceCounts )
+			{
+				if ( count >= 4 && ( (size_t)( offset + count ) ) * 3 <= def.hullPoints.size() )
+				{
+					b3HullData* hull =
+						b3CreateHull( (const b3Vec3*)def.hullPoints.data() + offset, count, kHullVertexBudget );
+					if ( hull != nullptr )
+					{
+						b3CreateHullShape( bodyId, &shapeDef, hull );
+						b3DestroyHull( hull );
+						any = true;
+					}
+				}
+				offset += count;
+			}
+			if ( any )
+			{
+				break;
+			}
+
+			// No usable piece: box of the given size so the body still exists.
+			b3BoxHull boxHull = b3MakeBoxHull( 0.5f * sizeX, 0.5f * sizeY, 0.5f * sizeZ );
+			b3CreateHullShape( bodyId, &shapeDef, &boxHull.base );
 			break;
 		}
 		case 4: // exact triangle mesh (concave OK); static/kinematic only
@@ -411,9 +715,20 @@ struct SolverCore::Impl
 	// their shapes may still be referenced until destroyWorld runs.
 	std::vector<b3MeshData*> orphanMeshes;
 
+	// Ground / container walls / world collision mesh bodies, kept only so
+	// the debug wireframe can draw them.
+	std::vector<b3BodyId> worldStaticBodies;
+
 	bool dirty = true;
 	double accumulator = 0.0;
 	int64_t stepCount = 0;
+
+	// Client liveness. Bypassed/disabled nodes never cook again and cannot
+	// unregister themselves (the SDK has no bypass notification), so advance()
+	// drops groups/joints whose owner stopped touching them. Client nodes use
+	// cookEveryFrame and re-touch on every cook.
+	uint64_t advanceCounter = 0;
+	std::map<uint32_t, uint64_t> jointTouch;
 
 	void destroyWorld()
 	{
@@ -423,6 +738,7 @@ struct SolverCore::Impl
 			world = b3_nullWorldId;
 		}
 		worldAnchorBody = b3_nullBodyId;
+		worldStaticBodies.clear();
 		for ( auto& entry : nodeJoints )
 		{
 			for ( NodeJoint& nj : entry.second )
@@ -481,6 +797,7 @@ struct SolverCore::Impl
 			b3BoxHull groundBox = b3MakeBoxHull( half, 1.0f, half );
 			b3ShapeDef groundShapeDef = b3DefaultShapeDef();
 			b3CreateHullShape( groundId, &groundShapeDef, &groundBox.base );
+			worldStaticBodies.push_back( groundId );
 		}
 
 		if ( settings.container )
@@ -498,6 +815,7 @@ struct SolverCore::Impl
 				b3ShapeDef wallShapeDef = b3DefaultShapeDef();
 				b3BoxHull wallHull = b3MakeBoxHull( hx, hy, hz );
 				b3CreateHullShape( wallId, &wallShapeDef, &wallHull.base );
+				worldStaticBodies.push_back( wallId );
 			};
 
 			// Four static walls around the play area, floor top at y=0.
@@ -527,6 +845,7 @@ struct SolverCore::Impl
 				b3BodyId bodyId = b3CreateBody( world, &bodyDef );
 				b3ShapeDef shapeDef = b3DefaultShapeDef();
 				b3CreateMeshShape( bodyId, &shapeDef, meshData, b3Vec3{ 1.0f, 1.0f, 1.0f } );
+				worldStaticBodies.push_back( bodyId );
 			}
 		}
 
@@ -819,7 +1138,8 @@ struct SolverCore::Impl
 				}
 
 				b3WorldTransform target = b3WorldTransform_identity;
-				target.p = b3Pos{ def.px, def.py, def.pz };
+				target.p = b3Pos{ std::isfinite( def.px ) ? def.px : 0.0f, std::isfinite( def.py ) ? def.py : 0.0f,
+								  std::isfinite( def.pz ) ? def.pz : 0.0f };
 				target.q = quatFromDef( def );
 
 				bool wake = false;
@@ -951,8 +1271,119 @@ void SolverCore::setGroup( uint32_t groupKey, std::vector<SpawnBody> defs )
 			}
 		}
 
-		// Incompatible (shape/size/type/count/hull changed): recreate only this
-		// group's bodies in the current world, keep everyone else running.
+		// Something changed structurally (shape/size/type/count/hull). Mesh
+		// shapes pool their b3MeshData per group without per-body tracking,
+		// so any mesh involvement falls back to the full recreate below;
+		// everything else gets patched PER INDEX: bodies whose def did not
+		// change keep their live body — and its simulated state — untouched.
+		// This is what lets an emitter-style Spawn SOP grow or shrink its
+		// point count without resetting the bodies already simulating. Body
+		// identity is the point index: keep upstream point order stable and
+		// append new points at the end.
+		bool anyMesh = false;
+		for ( const SpawnBody& d : group.defs )
+		{
+			anyMesh = anyMesh || d.shape == 4;
+		}
+		for ( const SpawnBody& d : defs )
+		{
+			anyMesh = anyMesh || d.shape == 4;
+		}
+
+		if ( !anyMesh )
+		{
+			const size_t oldCount = group.bodies.size() < group.defs.size() ? group.bodies.size() : group.defs.size();
+			const size_t newCount = defs.size();
+			const size_t common = oldCount < newCount ? oldCount : newCount;
+
+			std::vector<b3BodyId> newBodies( newCount, b3_nullBodyId );
+			bool structural = group.bodies.size() != newCount;
+
+			for ( size_t i = 0; i < common; ++i )
+			{
+				if ( sameShapeAndType( group.defs[i], defs[i] ) && B3_IS_NON_NULL( group.bodies[i] ) )
+				{
+					// Unchanged: the live body carries over as-is.
+					newBodies[i] = group.bodies[i];
+					if ( !sameMaterial( group.defs[i], defs[i] ) )
+					{
+						applyMaterialToBody( newBodies[i], defs[i] );
+					}
+					if ( defs[i].type != 2 && !samePose( group.defs[i], defs[i] ) )
+					{
+						setBodyTransformFromDef( newBodies[i], defs[i] );
+					}
+					if ( !sameJointPivot( group.defs[i], defs[i] ) )
+					{
+						m->jointsDirty = true;
+					}
+					continue;
+				}
+
+				// This index changed: recreate it, preserving the dynamic
+				// state when the spawn pose is unchanged (finite state only).
+				structural = true;
+				bool keep = false;
+				b3Pos kp;
+				b3Quat kq;
+				b3Vec3 kv, kw;
+				if ( defs[i].type == 2 && group.defs[i].type == 2 && samePose( group.defs[i], defs[i] ) &&
+					 B3_IS_NON_NULL( group.bodies[i] ) )
+				{
+					kp = b3Body_GetPosition( group.bodies[i] );
+					kq = b3Body_GetRotation( group.bodies[i] );
+					kv = b3Body_GetLinearVelocity( group.bodies[i] );
+					kw = b3Body_GetAngularVelocity( group.bodies[i] );
+					keep = std::isfinite( (float)kp.x ) && std::isfinite( (float)kp.y ) && std::isfinite( (float)kp.z ) &&
+						   std::isfinite( kq.v.x ) && std::isfinite( kq.v.y ) && std::isfinite( kq.v.z ) &&
+						   std::isfinite( kq.s ) && std::isfinite( kv.x ) && std::isfinite( kv.y ) &&
+						   std::isfinite( kv.z ) && std::isfinite( kw.x ) && std::isfinite( kw.y ) &&
+						   std::isfinite( kw.z );
+				}
+				if ( B3_IS_NON_NULL( group.bodies[i] ) )
+				{
+					b3DestroyBody( group.bodies[i] );
+				}
+				std::vector<b3BodyId> made;
+				createBodyFromDef( m->world, defs[i], made, group.meshes );
+				newBodies[i] = made.empty() ? b3_nullBodyId : made[0];
+				if ( keep && B3_IS_NON_NULL( newBodies[i] ) )
+				{
+					b3Body_SetTransform( newBodies[i], kp, kq );
+					b3Body_SetLinearVelocity( newBodies[i], kv );
+					b3Body_SetAngularVelocity( newBodies[i], kw );
+				}
+			}
+
+			// Shrunk: drop the tail. Grown: spawn the new tail.
+			for ( size_t i = common; i < group.bodies.size(); ++i )
+			{
+				if ( B3_IS_NON_NULL( group.bodies[i] ) )
+				{
+					b3DestroyBody( group.bodies[i] );
+					structural = true;
+				}
+			}
+			for ( size_t i = common; i < newCount; ++i )
+			{
+				std::vector<b3BodyId> made;
+				createBodyFromDef( m->world, defs[i], made, group.meshes );
+				newBodies[i] = made.empty() ? b3_nullBodyId : made[0];
+				structural = true;
+			}
+
+			group.bodies = std::move( newBodies );
+			group.defs = std::move( defs );
+			if ( structural )
+			{
+				// box3d killed any joints attached to destroyed bodies, and
+				// index-series joints may now resolve further (or less far).
+				m->jointsDirty = true;
+			}
+			return;
+		}
+
+		// Mesh involved: full recreate (per-group mesh blobs die together).
 		// Dynamic bodies whose spawn pose is unchanged keep their simulated
 		// pose and velocity, so a live shape/size tweak does not reset the sim.
 		struct PreservedState
@@ -977,6 +1408,21 @@ void SolverCore::setGroup( uint32_t groupKey, std::vector<SpawnBody> defs )
 					preserved[i].q = b3Body_GetRotation( group.bodies[i] );
 					preserved[i].v = b3Body_GetLinearVelocity( group.bodies[i] );
 					preserved[i].w = b3Body_GetAngularVelocity( group.bodies[i] );
+
+					// Never carry a corrupted state into the fresh body: if the
+					// old one blew up (NaN pose/velocity from a degenerate
+					// collider), respawning at the spawn pose is the recovery.
+					bool finite = std::isfinite( (float)preserved[i].p.x ) && std::isfinite( (float)preserved[i].p.y ) &&
+								  std::isfinite( (float)preserved[i].p.z ) && std::isfinite( preserved[i].q.v.x ) &&
+								  std::isfinite( preserved[i].q.v.y ) && std::isfinite( preserved[i].q.v.z ) &&
+								  std::isfinite( preserved[i].q.s ) && std::isfinite( preserved[i].v.x ) &&
+								  std::isfinite( preserved[i].v.y ) && std::isfinite( preserved[i].v.z ) &&
+								  std::isfinite( preserved[i].w.x ) && std::isfinite( preserved[i].w.y ) &&
+								  std::isfinite( preserved[i].w.z );
+					if ( !finite )
+					{
+						preserved[i].valid = false;
+					}
 				}
 			}
 		}
@@ -1050,6 +1496,8 @@ void SolverCore::setGroupPath( uint32_t groupKey, const char* path )
 	{
 		return;
 	}
+	// Clients call this every cook, so it doubles as the group heartbeat.
+	it->second.lastTouch = m->advanceCounter;
 	if ( it->second.path != path )
 	{
 		it->second.path = path;
@@ -1072,6 +1520,9 @@ void SolverCore::setJointNodeList( uint32_t ownerKey, const std::vector<JointSpe
 		removeJointNode( ownerKey );
 		return;
 	}
+
+	// Clients call this every cook, so it doubles as the joints heartbeat.
+	m->jointTouch[ownerKey] = m->advanceCounter;
 
 	if ( it != m->nodeJoints.end() )
 	{
@@ -1125,6 +1576,7 @@ void SolverCore::removeJointNode( uint32_t ownerKey )
 		}
 	}
 	m->nodeJoints.erase( it );
+	m->jointTouch.erase( ownerKey );
 }
 
 bool SolverCore::getJointAnchors( uint32_t ownerKey, int jointIndex, float outA[3], float outB[3] ) const
@@ -1164,6 +1616,82 @@ int SolverCore::groupCount() const
 	return (int)myImpl->groups.size();
 }
 
+void SolverCore::getGroupWireframe( uint32_t groupKey, std::vector<float>& segments, std::vector<float>& colors ) const
+{
+	const Impl* m = myImpl;
+	if ( !B3_IS_NON_NULL( m->world ) )
+	{
+		return;
+	}
+	auto it = m->groups.find( groupKey );
+	if ( it != m->groups.end() )
+	{
+		debugAppendGroup( segments, colors, it->second );
+	}
+}
+
+void SolverCore::getDebugWireframe( bool bodies, bool worldStatics, bool joints, std::vector<float>& segments,
+									std::vector<float>& colors ) const
+{
+	const Impl* m = myImpl;
+	if ( !B3_IS_NON_NULL( m->world ) )
+	{
+		return;
+	}
+
+	constexpr float kWorldColor[3] = { 0.35f, 0.35f, 0.38f };
+	constexpr float kJointColor[3] = { 1.0f, 0.9f, 0.15f };
+
+	if ( bodies )
+	{
+		for ( const auto& entry : m->groups )
+		{
+			debugAppendGroup( segments, colors, entry.second );
+		}
+	}
+
+	if ( worldStatics )
+	{
+		for ( b3BodyId bodyId : m->worldStaticBodies )
+		{
+			debugAppendBody( segments, colors, kWorldColor, bodyId );
+		}
+	}
+
+	if ( joints )
+	{
+		for ( const auto& entry : m->nodeJoints )
+		{
+			for ( const Impl::NodeJoint& nj : entry.second )
+			{
+				if ( !B3_IS_NON_NULL( nj.id ) || !b3Joint_IsValid( nj.id ) )
+				{
+					continue;
+				}
+				b3Transform xfA = toLocalTransform( nj.bodyA );
+				b3Transform xfB = toLocalTransform( nj.bodyB );
+				b3Vec3 a = b3Add( b3RotateVector( xfA.q, nj.localA.p ), xfA.p );
+				b3Vec3 b = b3Add( b3RotateVector( xfB.q, nj.localB.p ), xfB.p );
+				debugPushSegment( segments, colors, kJointColor, a, b );
+
+				// Small cross at each anchor so pinned (zero-length) joints
+				// are still visible.
+				constexpr float kTick = 0.05f;
+				const b3Vec3 anchors[2] = { a, b };
+				for ( const b3Vec3& p : anchors )
+				{
+					debugPushSegment( segments, colors, kJointColor, b3Vec3{ p.x - kTick, p.y, p.z },
+									  b3Vec3{ p.x + kTick, p.y, p.z } );
+					debugPushSegment( segments, colors, kJointColor, b3Vec3{ p.x, p.y - kTick, p.z },
+									  b3Vec3{ p.x, p.y + kTick, p.z } );
+					debugPushSegment( segments, colors, kJointColor, b3Vec3{ p.x, p.y, p.z - kTick },
+									  b3Vec3{ p.x, p.y, p.z + kTick } );
+				}
+			}
+		}
+	}
+}
+
 void SolverCore::requestRebuild()
 {
 	myImpl->dirty = true;
@@ -1172,6 +1700,43 @@ void SolverCore::requestRebuild()
 void SolverCore::advance( double dtSeconds, bool simulate )
 {
 	Impl* m = myImpl;
+	++m->advanceCounter;
+
+	// Drop groups/joints whose owner node stopped cooking (bypassed, cook
+	// flag off, deleted COMP...). Clients cook every frame and touch their
+	// registrations each cook, so a few advances of silence means the node
+	// is out of the network's cook loop and its physics must go with it.
+	// Un-bypassing re-registers everything on the node's next cook.
+	constexpr uint64_t kStaleAdvances = 4;
+	if ( m->advanceCounter > kStaleAdvances )
+	{
+		std::vector<uint32_t> stale;
+		for ( const auto& entry : m->groups )
+		{
+			if ( m->advanceCounter - entry.second.lastTouch > kStaleAdvances )
+			{
+				stale.push_back( entry.first );
+			}
+		}
+		for ( uint32_t key : stale )
+		{
+			removeGroup( key );
+		}
+
+		stale.clear();
+		for ( const auto& entry : m->jointTouch )
+		{
+			if ( m->advanceCounter - entry.second > kStaleAdvances )
+			{
+				stale.push_back( entry.first );
+			}
+		}
+		for ( uint32_t key : stale )
+		{
+			removeJointNode( key );
+		}
+	}
+
 	if ( m->dirty )
 	{
 		m->rebuild();

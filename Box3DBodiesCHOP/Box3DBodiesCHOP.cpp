@@ -142,6 +142,8 @@ void FillCHOPPluginInfo( CHOP_PluginInfo* info )
 
 	customInfo.minInputs = 0;
 	customInfo.maxInputs = 0;
+	// Kick-start cookEveryFrame on scene load (see getGeneralInfo).
+	customInfo.cookOnStart = true;
 }
 
 DLLEXPORT
@@ -182,8 +184,10 @@ void Box3DBodiesCHOP::unregisterGroup()
 
 void Box3DBodiesCHOP::getGeneralInfo( CHOP_GeneralInfo* ginfo, const OP_Inputs*, void* )
 {
-	// Follows the simulation every frame while its output is in use.
-	ginfo->cookEveryFrameIfAsked = true;
+	// Cook unconditionally: this node's cook keeps its group registered (and
+	// its heartbeat alive) in the physics world. Bypassing the node stops
+	// its cooking and the solver drops the group after a few silent steps.
+	ginfo->cookEveryFrame = true;
 	ginfo->timeslice = false;
 }
 
@@ -321,6 +325,9 @@ void Box3DBodiesCHOP::setupParameters( OP_ParameterManager* manager, void* )
 		p.name = SolverName;
 		p.label = "Solver";
 		p.page = "Bodies";
+		// Auto-bind: a sibling solver with TD's default name resolves on
+		// creation (paths are relative to this node).
+		p.defaultValue = "box3dsolver1";
 		manager->appendCHOP( p );
 	}
 
