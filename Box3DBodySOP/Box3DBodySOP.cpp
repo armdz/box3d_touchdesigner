@@ -28,6 +28,8 @@ constexpr char JointrefAttrName[] = "joint_ref";
 constexpr char JointrefwAttrName[] = "joint_ref_w";
 constexpr char TypeName[] = "Type";
 constexpr char BulletccdName[] = "Bulletccd";
+constexpr char WallthicknessName[] = "Wallthickness";
+constexpr char OpentopName[] = "Opentop";
 constexpr char ShowcollisionName[] = "Showcollision";
 constexpr char DensityName[] = "Density";
 constexpr char FrictionName[] = "Friction";
@@ -48,6 +50,8 @@ int menuShapeToCoreShape( int menuShape )
 			return 4; // exact triangle mesh (static/kinematic)
 		case 5:
 			return 5; // compound of hulls (concave OK, dynamic OK)
+		case 6:
+			return 6; // hollow box / container (collision faces inward)
 		default:
 			return 3; // input hull
 	}
@@ -462,6 +466,40 @@ void setBoundsFromLocalPoints( SOP_Output* output, const BodyTransform& t, const
 	output->setBoundingBox( bbox );
 }
 
+// Append a box as 24 points (6 faces × 4), each face flat-shaded with a 0..1 UV
+// so generated boxes/containers carry texture coordinates. Body-local box is
+// centered at (ox,oy,oz) with the given half extents; transformed to world.
+void appendBoxWithUV( SOP_Output* output, const b3Matrix3& r, const BodyTransform& t, float ox, float oy, float oz,
+					  float hx, float hy, float hz, std::vector<Position>& worldPoints )
+{
+	const float nrm[6][3] = { { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 } };
+	const float verts[6][4][3] = {
+		{ { hx, -hy, -hz }, { hx, hy, -hz }, { hx, hy, hz }, { hx, -hy, hz } },		 // +X
+		{ { -hx, -hy, hz }, { -hx, hy, hz }, { -hx, hy, -hz }, { -hx, -hy, -hz } },	 // -X
+		{ { -hx, hy, hz }, { hx, hy, hz }, { hx, hy, -hz }, { -hx, hy, -hz } },		 // +Y
+		{ { -hx, -hy, -hz }, { hx, -hy, -hz }, { hx, -hy, hz }, { -hx, -hy, hz } },	 // -Y
+		{ { -hx, -hy, hz }, { hx, -hy, hz }, { hx, hy, hz }, { -hx, hy, hz } },		 // +Z
+		{ { hx, -hy, -hz }, { -hx, -hy, -hz }, { -hx, hy, -hz }, { hx, hy, -hz } },	 // -Z
+	};
+	const float uv[4][2] = { { 0, 0 }, { 1, 0 }, { 1, 1 }, { 0, 1 } };
+
+	for ( int f = 0; f < 6; ++f )
+	{
+		int base = output->getNumPoints();
+		for ( int k = 0; k < 4; ++k )
+		{
+			Position p = applyTransform( r, t, ox + verts[f][k][0], oy + verts[f][k][1], oz + verts[f][k][2] );
+			output->addPoint( p );
+			worldPoints.push_back( p );
+			output->setNormal( rotateVector( r, nrm[f][0], nrm[f][1], nrm[f][2] ), base + k );
+			TexCoord tc( uv[k][0], uv[k][1], 0.0f );
+			output->setTexCoord( &tc, 1, base + k );
+		}
+		output->addTriangle( base + 0, base + 1, base + 2 );
+		output->addTriangle( base + 0, base + 2, base + 3 );
+	}
+}
+
 } // namespace
 
 extern "C"
@@ -552,6 +590,8 @@ Box3DBodySOP::BodySettings Box3DBodySOP::readSettings( const OP_Inputs* inputs )
 
 	s.type = inputs->getParInt( TypeName );
 	s.bullet = inputs->getParInt( BulletccdName ) != 0;
+	s.wallThickness = (float)inputs->getParDouble( WallthicknessName );
+	s.openTop = inputs->getParInt( OpentopName ) != 0;
 	s.jointEnabled = inputs->getParInt( JointName ) != 0;
 	inputs->getParDouble3( JointpivotName, x, y, z );
 	s.jointPivotX = (float)x;
@@ -797,6 +837,9 @@ void Box3DBodySOP::execute( SOP_Output* output, const OP_Inputs* inputs, void* )
 	inputs->enablePar( JointName, !hasInputJointAttrs );
 	inputs->enablePar( JointpivotName, !hasInputJointAttrs && settings.jointEnabled );
 	inputs->enablePar( ShowjointpivotName, !hasInputJointAttrs && settings.jointEnabled );
+	// Container-only params.
+	inputs->enablePar( WallthicknessName, settings.shape == 6 );
+	inputs->enablePar( OpentopName, settings.shape == 6 );
 	uint32_t sopId = input != nullptr ? input->opId : 0;
 	int64_t sopCooks = input != nullptr ? input->totalCooks : -1;
 
@@ -833,6 +876,8 @@ void Box3DBodySOP::execute( SOP_Output* output, const OP_Inputs* inputs, void* )
 		def.sizeX = settings.sizeX;
 		def.sizeY = settings.sizeY;
 		def.sizeZ = settings.sizeZ;
+		def.wallThickness = settings.wallThickness;
+		def.openTop = settings.openTop;
 
 		if ( input != nullptr )
 		{
@@ -1468,29 +1513,48 @@ void Box3DBodySOP::outputPrimitiveMesh( SOP_Output* output, const BodySettings& 
 		coreShape = 0; // no input: hull/mesh/compound preview as a box
 	}
 
+	if ( coreShape == 6 )
+	{
+		// Container: the same six (or five) wall slabs box3d collides with, so
+		// you see the crate and its inward-facing cavity. Open Top drops the lid.
+		float hx = 0.5f * s.sizeX, hy = 0.5f * s.sizeY, hz = 0.5f * s.sizeZ;
+		float tt = s.wallThickness > 0.001f ? s.wallThickness : 0.001f;
+		float ht = 0.5f * tt;
+		if ( ht > hx * 0.98f )
+			ht = hx * 0.98f;
+		if ( ht > hy * 0.98f )
+			ht = hy * 0.98f;
+		if ( ht > hz * 0.98f )
+			ht = hz * 0.98f;
+
+		std::vector<Position> worldPoints;
+		appendBoxWithUV( output, r, t, hx - ht, 0.0f, 0.0f, ht, hy, hz, worldPoints );		 // +X
+		appendBoxWithUV( output, r, t, -( hx - ht ), 0.0f, 0.0f, ht, hy, hz, worldPoints );	 // -X
+		appendBoxWithUV( output, r, t, 0.0f, 0.0f, hz - ht, hx, hy, ht, worldPoints );		 // +Z
+		appendBoxWithUV( output, r, t, 0.0f, 0.0f, -( hz - ht ), hx, hy, ht, worldPoints );	 // -Z
+		appendBoxWithUV( output, r, t, 0.0f, -( hy - ht ), 0.0f, hx, ht, hz, worldPoints );	 // -Y floor
+		if ( !s.openTop )
+			appendBoxWithUV( output, r, t, 0.0f, hy - ht, 0.0f, hx, ht, hz, worldPoints ); // +Y lid
+
+		if ( !worldPoints.empty() )
+		{
+			addJointPreviewMarker( output, s.jointEnabled, s.showJointPivot, s.jointPivotX, s.jointPivotY,
+								   s.jointPivotZ, s.sizeX, s.sizeY, s.sizeZ, t, worldPoints );
+			setBoundsFromPoints( output, worldPoints.data(), (int)worldPoints.size() );
+		}
+		return;
+	}
+
 	if ( coreShape == 0 )
 	{
-		// Box: 8 corners, 12 triangles
+		// Box: 24 points (per-face) so it carries flat normals and 0..1 UVs.
 		float hx = 0.5f * s.sizeX, hy = 0.5f * s.sizeY, hz = 0.5f * s.sizeZ;
-		const float corners[8][3] = { { -hx, -hy, -hz }, { hx, -hy, -hz }, { hx, hy, -hz }, { -hx, hy, -hz },
-									  { -hx, -hy, hz },	 { hx, -hy, hz },  { hx, hy, hz },	{ -hx, hy, hz } };
 		std::vector<Position> worldPoints;
-		worldPoints.reserve( 8 );
-		for ( int i = 0; i < 8; ++i )
-		{
-			Position p = applyTransform( r, t, corners[i][0], corners[i][1], corners[i][2] );
-			output->addPoint( p );
-			worldPoints.push_back( p );
-			float inv = 1.0f / sqrtf( corners[i][0] * corners[i][0] + corners[i][1] * corners[i][1] +
-									  corners[i][2] * corners[i][2] + 1e-12f );
-			output->setNormal( rotateVector( r, corners[i][0] * inv, corners[i][1] * inv, corners[i][2] * inv ), i );
-		}
+		worldPoints.reserve( 24 );
+		appendBoxWithUV( output, r, t, 0.0f, 0.0f, 0.0f, hx, hy, hz, worldPoints );
 		addJointPreviewMarker( output, s.jointEnabled, s.showJointPivot, s.jointPivotX, s.jointPivotY, s.jointPivotZ,
 							   s.sizeX, s.sizeY, s.sizeZ, t, worldPoints );
 		setBoundsFromPoints( output, worldPoints.data(), (int)worldPoints.size() );
-		const int32_t tris[36] = { 0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4,
-								   2, 3, 7, 2, 7, 6, 1, 2, 6, 1, 6, 5, 0, 4, 7, 0, 7, 3 };
-		output->addTriangles( tris, 12 );
 		return;
 	}
 
@@ -1524,6 +1588,8 @@ void Box3DBodySOP::outputPrimitiveMesh( SOP_Output* output, const BodySettings& 
 
 			output->addPoint( applyTransform( r, t, radius * nx, radius * ny + yOffset, radius * nz ) );
 			output->setNormal( rotateVector( r, nx, ny, nz ), pointIndex );
+			TexCoord tc( (float)seg / (float)kSegments, 1.0f - (float)ring / (float)kRings, 0.0f );
+			output->setTexCoord( &tc, 1, pointIndex );
 			++pointIndex;
 		}
 	}
@@ -1555,13 +1621,13 @@ void Box3DBodySOP::executeVBO( SOP_VBOOutput*, const OP_Inputs*, void* )
 
 int32_t Box3DBodySOP::getNumInfoCHOPChans( void* )
 {
-	return 13;
+	return 16;
 }
 
 void Box3DBodySOP::getInfoCHOPChan( int32_t index, OP_InfoCHOPChan* chan, void* )
 {
-	static const char* names[13] = { "tx", "ty", "tz", "rx", "ry", "rz", "vx",
-									 "vy", "vz", "wx", "wy", "wz", "awake" };
+	static const char* names[16] = { "tx", "ty", "tz", "rx", "ry", "rz", "vx", "vy",
+									 "vz", "wx", "wy", "wz", "awake", "touching", "impulse", "hitspeed" };
 	chan->name->setString( names[index] );
 
 	if ( index < 3 )
@@ -1580,11 +1646,26 @@ void Box3DBodySOP::getInfoCHOPChan( int32_t index, OP_InfoCHOPChan* chan, void* 
 		return;
 	}
 
+	SolverCore* core = mySolverOpId != 0 ? Registry::find( mySolverOpId ) : nullptr;
+
+	// Contact state: touching count, summed normal impulse, and last hit
+	// speed (nonzero for one frame per impact — trigger material).
+	if ( index >= 13 )
+	{
+		tdb3::BodyContactState contact = {};
+		if ( core != nullptr )
+		{
+			core->getGroupContactStates( myOpId, &contact, 1 );
+		}
+		const float vals[3] = { contact.touching, contact.impulse, contact.hitSpeed };
+		chan->value = vals[index - 13];
+		return;
+	}
+
 	// Velocities and awake state, straight from the live body (zeros when the
 	// solver is missing). Angular velocity in deg/s.
 	constexpr float kRadToDeg = 57.295779513082320877f;
 	tdb3::BodyState state = {};
-	SolverCore* core = mySolverOpId != 0 ? Registry::find( mySolverOpId ) : nullptr;
 	if ( core != nullptr )
 	{
 		core->getGroupStates( myOpId, &state, 1 );
@@ -1612,7 +1693,7 @@ void Box3DBodySOP::setupParameters( OP_ParameterManager* manager, void* )
 		p.page = "Body";
 		// Auto-bind: a sibling solver with TD's default name resolves on
 		// creation (paths are relative to this node).
-		p.defaultValue = "box3dsolver1";
+		p.defaultValue = "Box3dsolver1";
 		manager->appendCHOP( p );
 	}
 
@@ -1630,9 +1711,10 @@ void Box3DBodySOP::setupParameters( OP_ParameterManager* manager, void* )
 		p.label = "Shape";
 		p.page = "Body";
 		p.defaultValue = "inputhull";
-		const char* names[] = { "inputhull", "box", "sphere", "capsule", "mesh", "compound" };
-		const char* labels[] = { "Input Hull", "Box", "Sphere", "Capsule", "Mesh (Static)", "Compound (Hulls)" };
-		manager->appendMenu( p, 6, names, labels );
+		const char* names[] = { "inputhull", "box", "sphere", "capsule", "mesh", "compound", "container" };
+		const char* labels[] = { "Input Hull", "Box",	"Sphere",	 "Capsule",
+								 "Mesh (Static)", "Compound (Hulls)", "Box (Container, Inward)" };
+		manager->appendMenu( p, 7, names, labels );
 	}
 
 	{
@@ -1716,6 +1798,30 @@ void Box3DBodySOP::setupParameters( OP_ParameterManager* manager, void* )
 		OP_NumericParameter p;
 		p.name = BulletccdName;
 		p.label = "CCD (Bullet)";
+		p.page = "Body";
+		p.defaultValues[0] = 0.0;
+		manager->appendToggle( p );
+	}
+
+	{
+		// Container shape only: thickness of the six inward-facing wall slabs.
+		OP_NumericParameter p;
+		p.name = WallthicknessName;
+		p.label = "Wall Thickness";
+		p.page = "Body";
+		p.defaultValues[0] = 0.1;
+		p.minValues[0] = 0.001;
+		p.minSliders[0] = 0.01;
+		p.maxSliders[0] = 1.0;
+		p.clampMins[0] = true;
+		manager->appendFloat( p );
+	}
+
+	{
+		// Container shape only: leave the top (+Y) face open to drop things in.
+		OP_NumericParameter p;
+		p.name = OpentopName;
+		p.label = "Open Top";
 		p.page = "Body";
 		p.defaultValues[0] = 0.0;
 		manager->appendToggle( p );

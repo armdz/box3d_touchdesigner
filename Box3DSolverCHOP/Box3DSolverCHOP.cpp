@@ -22,6 +22,7 @@ constexpr char SubstepsName[] = "Substeps";
 constexpr char MaxstepspercookName[] = "Maxstepspercook";
 constexpr char WorkersName[] = "Workers";
 constexpr char SleepName[] = "Sleep";
+constexpr char HitthresholdName[] = "Hitthreshold";
 constexpr char GroundName[] = "Ground";
 constexpr char GroundsizeName[] = "Groundsize";
 constexpr char ContainerName[] = "Container";
@@ -55,6 +56,7 @@ WorldSettings readWorldSettings( const OP_Inputs* inputs )
 	s.subSteps = inputs->getParInt( SubstepsName );
 	s.maxStepsPerCook = inputs->getParInt( MaxstepspercookName );
 	s.sleep = inputs->getParInt( SleepName ) != 0;
+	s.hitThreshold = (float)inputs->getParDouble( HitthresholdName );
 	return s;
 }
 
@@ -215,7 +217,7 @@ void Box3DSolverCHOP::execute( CHOP_Output* output, const OP_Inputs* inputs, voi
 
 int32_t Box3DSolverCHOP::getNumInfoCHOPChans( void* )
 {
-	return 4;
+	return 5;
 }
 
 void Box3DSolverCHOP::getInfoCHOPChan( int32_t index, OP_InfoCHOPChan* chan, void* )
@@ -237,10 +239,15 @@ void Box3DSolverCHOP::getInfoCHOPChan( int32_t index, OP_InfoCHOPChan* chan, voi
 		chan->name->setString( "step_count" );
 		chan->value = core != nullptr ? (float)core->stepCount() : 0.0f;
 	}
-	else
+	else if ( index == 3 )
 	{
 		chan->name->setString( "joint_count" );
 		chan->value = core != nullptr ? (float)core->activeJointCount() : 0.0f;
+	}
+	else
+	{
+		chan->name->setString( "contact_events" );
+		chan->value = core != nullptr ? (float)core->contactEventCount() : 0.0f;
 	}
 }
 
@@ -348,6 +355,21 @@ void Box3DSolverCHOP::setupParameters( OP_ParameterManager* manager, void* )
 		p.page = "Solver";
 		p.defaultValues[0] = 1.0;
 		manager->appendToggle( p );
+	}
+
+	{
+		// Collision speed needed to emit a hit event (Contacts CHOP / hit
+		// channels). Lower = more sensitive.
+		OP_NumericParameter p;
+		p.name = HitthresholdName;
+		p.label = "Hit Speed Threshold";
+		p.page = "Solver";
+		p.defaultValues[0] = 1.0;
+		p.minValues[0] = 0.0;
+		p.minSliders[0] = 0.0;
+		p.maxSliders[0] = 10.0;
+		p.clampMins[0] = true;
+		manager->appendFloat( p );
 	}
 
 	{

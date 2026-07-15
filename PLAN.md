@@ -19,7 +19,18 @@ Usar este bloque como fuente de verdad rápida:
 - **Body SOP**: seguimiento de animación rígida upstream para minimizar rebuild global; mantiene salida SOP transformada.
 - **Instances CHOP**: salida `tx ty tz rx ry rz sx sy sz` (escala saneada para evitar 0/negativos en render).
 - **Defaults de spawn/instances**: tamaño unitario (`1,1,1`), más defaults de `restitution` y `type`.
+- **Fuerzas / atractor (Box3D Force CHOP)**: `ForceField` en el core (attractor/repulsor/wind/vortex, strength/radius/falloff/mass-indep/target group) aplicado a bodies dinámicos antes de cada step; registrado por nodo con heartbeat como joints. **Box3D Force CHOP** (`Box3dforce`): posición por param o un Points SOP (multi-atractor), target all o un grupo por path.
+- **Box contenedor (colisión hacia adentro)**: shape 6 del core (`hollow box`) — 6 (o 5) slabs finas con `b3MakeOffsetBoxHull` como shapes múltiples de un body, la cavidad colisiona hacia adentro; expuesto en el Body SOP como `Box (Container, Inward)` con `Wall Thickness` + `Open Top`. Static/kinematic/dynamic.
 - **Material presets (Instances)**: `Custom`, `Soft`, `Medium`, `Bouncy` para fallback rápido de material.
+- **Ragdoll**: `JointSpec.pivotMode` cableado (0 pivot-a-pivot, 1 pivote de A, 2 pivote de B —
+  convención ragdoll: el hueso hijo lleva el ancla —, 3 ancla mundial explícita), expuesto como menú
+  `Pivot` + `Anchor` en el Joint CHOP; **Box3D Ragdoll SOP** (`Box3dragdoll`): humanoide completo en un
+  nodo — 11 cápsulas + 10 joints con límites anatómicos, salida geometría simulada o puntos con
+  `orient`/`scale`/`bone` para instancing.
+- **Eventos de contacto**: el core captura begin/end/hit de `b3World_GetContactEvents` por advance;
+  **Box3D Contacts CHOP** los emite (un sample por evento, con punto/normal/velocidad e Info DAT con paths),
+  Instances CHOP tiene toggle `Contact Channels` (`touching impulse hitspeed` por instancia), el Info CHOP del
+  Body SOP expone lo mismo y el Solver ganó `Hit Speed Threshold`.
 
 ## Objetivo
 
@@ -209,7 +220,7 @@ re-crean el mundo si "Reset On Input Change" está activo (detección por `opId`
   por opId). Grupo nuevo se reporta en pose de spawn hasta el próximo cook del solver
   (1 frame de latencia). Los plugins NO llaman funciones link-level de box3d (no se
   exportan del core); solo math inline de los headers.
-  Falta de 4: COMP wrappers .tox, eventos de contacto como salida.
+  Falta de 4: COMP wrappers .tox. (Eventos de contacto ✅ — ver Fase 6.)
 - **Fase 4b — Box3D Body SOP (actor individual)** ✅: nodo `Box3dbody` (familia SOP, API
   v3). UN body por nodo: input SOP opcional = su geometría; Shape = Input Hull (hull
   convexo de los puntos del input, `b3CreateHull` con budget 64 vértices, origen del body
@@ -234,6 +245,23 @@ re-crean el mundo si "Reset On Input Change" está activo (detección por `opId`
   (`Workers`), posible salida POP. Canales extra de estado (velocidades/awake) ✅ en
   Instances CHOP (toggle) e Info CHOP del Body SOP. Familia de nodos: Solver CHOP ·
   Body SOP · Instances CHOP · Joint CHOP · Set Joint SOP.
+- **Fase 6 — Eventos de contacto** ✅: el core habilita `enableContactEvents` +
+  `enableHitEvents` en todos los shapes de grupos (flags OR-eados por par, así que pares
+  contra los estáticos del mundo también reportan), etiqueta cada body con
+  (groupKey, índice) empaquetado en el userData, y después de cada `b3World_Step` traduce
+  `b3World_GetContactEvents` a un buffer de `ContactEvent` {kind begin/end/hit, grupo+índice
+  de A y B, punto, normal A→B, approach speed} que vive exactamente un advance (se limpia al
+  inicio del siguiente, también en pausa). API: `contactEventCount`/`getContactEvents`,
+  `getGroupContactStates` (por body: touching count vía `b3Body_GetContactData`, impulso
+  normal sumado, hit speed máximo del último advance), `getGroupPathByKey`,
+  `findGroupKeyByPath`. Consumidores: **Box3D Contacts CHOP** (`Box3dcontacts`, DLL nueva:
+  un sample por evento, canales `active kind idxa idxb worlda worldb px py pz nx ny nz
+  speed`; toggles por tipo de evento; `Body Filter` normaliza el body filtrado al lado A;
+  Info DAT con paths de nodos por evento; Info CHOP con counts), toggle **Contact
+  Channels** en Instances CHOP (`touching impulse hitspeed` por instancia), Info CHOP del
+  Body SOP (idem, canales 13–15) y `contact_events` en el Info CHOP del Solver. El Solver
+  ganó `Hit Speed Threshold` (m/s, live via `b3World_SetHitEventThreshold`). Pendiente:
+  sensores (`isSensor`/`enableSensorEvents`), filtrado de colisiones (categorías/máscaras).
 
 ## Layout del repo
 
@@ -250,6 +278,8 @@ box3d-touchdesigner/
   Box3DJointCHOP/          ← joints (hasta 8 pares + series)
   Box3DSetJointSOP/        ← pivote de joint como atributos en la cadena SOP
   Box3DDebugSOP/           ← debug draw del mundo de colisión
+  Box3DContactsCHOP/       ← eventos de colisión (begin/end/hit)
+  Box3DRagdollSOP/         ← ragdoll humanoide de un nodo (11 huesos + 10 joints)
   TD-Examples/             ← escenas .toe de ejemplo
   tox/                     ← COMP wrappers (WIP)
   build/                   ← build dir de CMake (no trackear)

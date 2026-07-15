@@ -18,6 +18,8 @@ constexpr char JointsName[] = "Joints";
 constexpr char CountName[] = "Count";
 constexpr char AxisName[] = "Axis";
 constexpr char CollideName[] = "Collide";
+constexpr char PivotmodeName[] = "Pivotmode";
+constexpr char AnchorName[] = "Anchor";
 
 // Body pair slots, Constant CHOP style: a Joints count parameter enables the
 // first N rows. The C++ SDK has no real sequential (+/-) parameters, so the
@@ -118,6 +120,15 @@ JointSpec readSharedSpec( const OP_Inputs* inputs )
 	}
 
 	spec.collideConnected = inputs->getParInt( CollideName ) != 0;
+
+	// Anchor placement: pivot-to-pivot (default), one body's pivot for both
+	// sides (mode "Body B Pivot" is the ragdoll convention — the child bone
+	// carries the anchor), or an explicit world point.
+	spec.pivotMode = inputs->getParInt( PivotmodeName );
+	inputs->getParDouble3( AnchorName, x, y, z );
+	spec.anchorX = (float)x;
+	spec.anchorY = (float)y;
+	spec.anchorZ = (float)z;
 	return spec;
 }
 
@@ -244,6 +255,7 @@ void Box3DJointCHOP::execute( CHOP_Output* output, const OP_Inputs* inputs, void
 	inputs->enablePar( MotorspeedName, type == 0 || type == 2 );
 	inputs->enablePar( MaxmotortorqueName, type == 0 || type == 2 );
 	inputs->enablePar( AxisName, type == 1 || type == 2 );
+	inputs->enablePar( AnchorName, inputs->getParInt( PivotmodeName ) == 3 );
 
 	const int pairCount = readPairCount( inputs );
 	const int seriesCount = readSeriesCount( inputs );
@@ -396,7 +408,7 @@ void Box3DJointCHOP::setupParameters( OP_ParameterManager* manager, void* )
 		p.page = "Joint";
 		// Auto-bind: a sibling solver with TD's default name resolves on
 		// creation (paths are relative to this node).
-		p.defaultValue = "box3dsolver1";
+		p.defaultValue = "Box3dsolver1";
 		manager->appendCHOP( p );
 	}
 
@@ -499,6 +511,34 @@ void Box3DJointCHOP::setupParameters( OP_ParameterManager* manager, void* )
 		{
 			p.minSliders[i] = -1.0;
 			p.maxSliders[i] = 1.0;
+		}
+		manager->appendXYZ( p );
+	}
+
+	{
+		// Anchor placement. "Body B Pivot" is the ragdoll convention: the
+		// child bone's pivot anchors both bodies, so bones jointed on both
+		// ends (thigh: hip + knee) articulate correctly with one pivot each.
+		OP_StringParameter p;
+		p.name = PivotmodeName;
+		p.label = "Pivot";
+		p.page = "Joint";
+		p.defaultValue = "each";
+		const char* names[] = { "each", "bodya", "bodyb", "anchor" };
+		const char* labels[] = { "Each Body's Pivot", "Body A Pivot", "Body B Pivot", "Explicit Anchor" };
+		manager->appendMenu( p, 4, names, labels );
+	}
+
+	{
+		OP_NumericParameter p;
+		p.name = AnchorName;
+		p.label = "Anchor";
+		p.page = "Joint";
+		for ( int i = 0; i < 3; ++i )
+		{
+			p.defaultValues[i] = 0.0;
+			p.minSliders[i] = -10.0;
+			p.maxSliders[i] = 10.0;
 		}
 		manager->appendXYZ( p );
 	}

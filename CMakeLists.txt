@@ -61,11 +61,22 @@ endif()
 add_subdirectory("${BOX3D_SOURCE_DIR}/src" box3d)
 
 # ---- outputs ----
-set(PLUGIN_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/plugin)
+# A parent project (the private repo that consumes this via add_subdirectory)
+# can pre-set PLUGIN_OUTPUT_DIRECTORY to gather every plugin DLL into one dir.
+if(NOT DEFINED PLUGIN_OUTPUT_DIRECTORY)
+	set(PLUGIN_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/plugin)
+endif()
 foreach(config "" _DEBUG _RELEASE _MINSIZEREL _RELWITHDEBINFO)
 	set(CMAKE_LIBRARY_OUTPUT_DIRECTORY${config} ${PLUGIN_OUTPUT_DIRECTORY})
 	set(CMAKE_RUNTIME_OUTPUT_DIRECTORY${config} ${PLUGIN_OUTPUT_DIRECTORY})
 endforeach()
+
+# SDK locations, exposed as cache vars so a parent project can reuse
+# add_td_plugin() for operators that live in a different source tree (the
+# private repo): the helper always resolves the SDK against the public tree,
+# never the caller's CMAKE_CURRENT_SOURCE_DIR.
+set(BOX3DTD_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/sdk" CACHE PATH "TD C++ SOP/CHOP SDK dir")
+set(BOX3DTD_SDK_POP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/sdk_pop" CACHE PATH "TD C++ POP SDK dir")
 
 # Shared core DLL: world registry + solver cores, with box3d statically
 # linked inside. TD allows one custom operator per plugin DLL, so the
@@ -107,13 +118,45 @@ function(add_td_plugin OPNAME)
 		)
 	endif()
 
-	target_include_directories(${OPNAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/sdk)
+	target_include_directories(${OPNAME} PRIVATE ${BOX3DTD_SDK_DIR})
 	target_link_libraries(${OPNAME} PRIVATE Box3DCore)
 endfunction()
 
 add_td_plugin(Box3DSolverCHOP)
 add_td_plugin(Box3DBodiesCHOP)
+add_td_plugin(Box3DContactsCHOP)
 add_td_plugin(Box3DBodySOP)
 add_td_plugin(Box3DJointCHOP)
+add_td_plugin(Box3DForceCHOP)
 add_td_plugin(Box3DSetJointSOP)
 add_td_plugin(Box3DDebugSOP)
+
+# NOTE: the ragdoll / cloth / Mixamo-skin operators live in a SEPARATE PRIVATE
+# repo that consumes this project via add_subdirectory (it reuses Box3DCore and
+# add_td_plugin). They are intentionally NOT built here.
+
+# ---- Box3D Instances (POP) ----
+# GPU/POP rigid-body instancing: one body per input point, output is an N-point
+# cloud with each body's live pose (P, rot, scale, v). CPU only (no vertex
+# deform), so it builds through CMake like the Skin POP — no nvcc.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Box3DInstancesPOP")
+	add_library(Box3DInstancesPOP MODULE
+		Box3DInstancesPOP/Box3DInstancesPOP.cpp
+		Box3DInstancesPOP/Box3DInstancesPOP.h
+	)
+	set_target_properties(Box3DInstancesPOP PROPERTIES PREFIX "" LINKER_LANGUAGE CXX)
+	if (APPLE)
+		set_target_properties(Box3DInstancesPOP PROPERTIES BUNDLE TRUE BUNDLE_EXTENSION "plugin"
+			BUILD_WITH_INSTALL_RPATH TRUE INSTALL_RPATH "@loader_path/../../../")
+	endif()
+	target_include_directories(Box3DInstancesPOP PRIVATE
+		${BOX3DTD_SDK_POP_DIR}
+		${CMAKE_CURRENT_SOURCE_DIR}/Box3DInstancesPOP
+	)
+	target_link_libraries(Box3DInstancesPOP PRIVATE Box3DCore)
+endif()
+
+# ---- Box3D Cloth GPU (POP, CUDA) ----
+# GPU POP plugins are built directly with nvcc (see build_clothpop.bat /
+# build_skincuda.bat), NOT through CMake — the Visual Studio CUDA toolset
+# integration isn't required that way. Kept out of the CMake build on purpose.

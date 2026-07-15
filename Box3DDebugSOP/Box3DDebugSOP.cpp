@@ -151,7 +151,7 @@ void Box3DDebugSOP::setupParameters( OP_ParameterManager* manager, void* )
 		p.page = "Debug";
 		// Auto-bind: a sibling solver with TD's default name resolves on
 		// creation (paths are relative to this node).
-		p.defaultValue = "box3dsolver1";
+		p.defaultValue = "Box3dsolver1";
 		manager->appendCHOP( p );
 	}
 

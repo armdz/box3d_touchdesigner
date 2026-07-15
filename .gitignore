@@ -12,4 +12,9 @@ CMakeUserPresets.json
 imgui.ini
 .DS_Store
 Thumbs.db
-11
+
+# Local-only WIP — kept out of the shared branch (see conversation)
+/Box3DClothSOP/
+/Box3DClothPOP/
+/sdk_pop/
+/build_clothpop.bat

@@ -9,15 +9,18 @@ arquitectura (por qué CHOP y no POP, composición sin cables vía registro glob
 operador por DLL sobre un core compartido), el contrato de atributos del Spawn SOP y el
 estado fase por fase. `README.md` es la doc pública en inglés (build, instalación, uso).
 
-Estado: Fases 0–5 (joints) completas. Nodos: **Box3D Solver CHOP** (mundo/step/Collision
+Estado: Fases 0–6 (joints, eventos de contacto) completas. Nodos: **Box3D Solver CHOP** (mundo/step/Collision
 SOP/Allow Sleep), **Box3D Body SOP** (un body: hull/primitiva/Mesh estático/Compound de
 hulls; salida = geometría transformada, con overlays de pivot y collider), **Box3D
 Instances CHOP** (masas para instancing, count variable en vivo), **Box3D Joint CHOP**
 (hasta 8 pares + series, estilo Constant CHOP), **Box3D Set Joint SOP** (pivote como
 atributos afín-invariantes en la cadena SOP), **Box3D Debug SOP** (wireframe del mundo de
-colisión real + joints, colores por estado). Todo sobre `Box3DCore.dll` (registro de
-mundos, box3d estático adentro). Pendiente: eventos de contacto, Force CHOP, filtrado de
-colisiones (categorías/máscaras), sensores, COMP wrappers .tox.
+colisión real + joints, colores por estado), **Box3D Contacts CHOP** (eventos de
+colisión: un sample por evento begin/end/hit con punto, normal y velocidad de impacto), **Box3D Force CHOP** (campos de fuerza: atractor/repulsor/viento/vórtice sobre las instancias),
+**Box3D Ragdoll SOP** (humanoide articulado completo en un nodo: 11 cápsulas + 10 joints
+con límites anatómicos; salida geometría simulada o puntos para instancing).
+Todo sobre `Box3DCore.dll` (registro de mundos, box3d estático adentro). Pendiente:
+filtrado de colisiones (categorías/máscaras), sensores, COMP wrappers .tox.
 
 Update 2026-07:
 
@@ -40,7 +43,7 @@ Update 2026-07:
   epsilon y signo de cuaternión alineado) — sin eso, un kinematic dormido nunca retomaba la animación upstream y
   su isla entera quedaba congelada. Deltas negativos (scrub hacia atrás) no drenan el acumulador.
 - Body SOP intenta seguir animación rígida upstream (Transform SOP) sin rebuild global.
-- El param `Solver` de todos los clientes (Body/Instances/Joint/Debug) tiene default `box3dsolver1`: un nodo
+- El param `Solver` de todos los clientes (Body/Instances/Joint/Debug) tiene default `Box3dsolver1`: un nodo
   creado junto a un solver con nombre default se bindea solo (path relativo al mismo COMP). No hay
   auto-descubrimiento real: el SDK no puede enumerar la escena, y bindear por Registry sin el param rompería
   el orden de cook (la referencia del parámetro ES la dependencia que hace que el mundo stepee antes que los
@@ -70,6 +73,10 @@ Update 2026-07:
   compartido por Body SOP mesh y Collision SOP del Solver) fan-triangula y flipea cada triángulo para que la
   cara que sombrea (normales point o vertex del input) sea la que colisiona; sin normales, el winding pasa tal
   cual. Cualquier polígono sirve (quads etc., el SDK ya convierte todo a Polygon).
+- **UVs en geometría generada** (fix): las primitivas del Body SOP (box/sphere/capsule) y el shape container
+  no emitían coordenadas de textura — solo el passthrough de input las tenía. Ahora: box/container se emiten
+  como 24 puntos por caja (`appendBoxWithUV`, 6 caras × 4, normal flat + uv 0..1); sphere/capsule llevan uv
+  lat-long en su teselación. TexCoord = 3 floats (u,v,w) por capa; `setTexCoord(&tc,1,idx)`.
 - El Body SOP y el Set Joint SOP preservan UVs (`setTexCoord/s`): Body maneja uv point y vertex (vertex expande
   puntos por vértice, mismo mecanismo que las normales vertex/primitive; normales point también se preservan en
   el path expandido); Set Joint solo uv/N de punto (mantiene topología compartida — ponerlo antes del Facet).
@@ -147,6 +154,150 @@ Update 2026-07:
   invariante bajo movimiento rígido): un input que colapsó (scale por cero/negativo) y volvió fuerza rebuild
   de referencia y de grupo sin depender del gating por cook-count — antes quedaba pegado hasta reconectar el
   wire. Set Joint no escribe atributos con 0 puntos.
+
+- **Eventos de contacto (Fase 6)**: el core habilita `enableContactEvents`/`enableHitEvents` en todos los shapes
+  de grupos (los flags se OR-ean por par ⇒ contra ground/paredes/Collision-mesh también reporta) y etiqueta cada
+  body con (groupKey, índice) empaquetado en `b3Body_SetUserData` (índice+1 en los 32 bits bajos para que un ref
+  real nunca sea null; userData null = "world"). Tras cada `b3World_Step`, `captureContactEvents()` traduce
+  `b3World_GetContactEvents` a `ContactEvent {kind 0 begin/1 end/2 hit, grupo+índice A y B, punto, normal A→B,
+  approach speed}`; el buffer vive exactamente un `advance()` (se limpia al inicio del siguiente, aún en pausa,
+  para que un evento nunca se reporte dos veces; tope 4096/advance). Begin events sacan punto/normal del manifold
+  vivo si sobrevivió al step; end events pueden traer shapes ya destruidos (se validan y caen a "world"). API:
+  `contactEventCount`/`getContactEvents`, `getGroupContactStates` (por body: `touching` = contactos con manifold
+  activo vía `b3Body_GetContactData`, `impulse` = suma de totalNormalImpulse, `hitSpeed` = máximo del último
+  advance), `getGroupPathByKey`, `findGroupKeyByPath`. Consumidores: **Box3D Contacts CHOP** (`Box3dcontacts`,
+  DLL nueva, cookEveryFrame — los eventos duran 1 frame): un sample por evento, canales `active kind idxa idxb
+  worlda worldb px py pz nx ny nz speed`, toggles Begin/End/Hit, `Body Filter` (path/nombre de un Body SOP o
+  Instances CHOP; filtra y normaliza ese body al lado A flipeando la normal, así `idxa` indexa directo sus
+  instancias), Info DAT con paths por evento e Info CHOP con counts. Instances CHOP: toggle `Contact Channels`
+  agrega `touching impulse hitspeed` por instancia (después del bloque activo, o sea el offset depende de Extra
+  Channels). Info CHOP del Body SOP: canales 13–15 idem. Solver: param `Hit Speed Threshold` (m/s, live vía
+  `b3World_SetHitEventThreshold`, default 1.0 — bajar para hits más sensibles) y canal info `contact_events`.
+  Uso típico de visualización: hitspeed como trigger de flash/audio (dura 1 frame), el Contacts CHOP como fuente
+  de partículas/decals en el punto de impacto (px..pz + normal), `touching` para tintar instancias en reposo.
+
+- **Ragdoll (pivotMode + Ragdoll SOP)**: `JointSpec.pivotMode` ahora se respeta en `createJointFromSpec`:
+  0 = pivot-a-pivot (comportamiento histórico), 1 = el pivote de A ancla ambos, 2 = el pivote de B ancla
+  ambos (convención ragdoll: el hueso HIJO lleva el ancla y el pivote del padre no se consulta — así un
+  body con dos articulaciones (muslo: cadera+rodilla) funciona con UN pivote), 3 = ancla mundial explícita
+  (`anchorX/Y/Z`). En el Joint CHOP: menú `Pivot` (each/bodya/bodyb/anchor) + param `Anchor` (se habilita
+  solo en modo anchor), página Joint. **Box3D Ragdoll SOP** (`Box3dragdoll`, DLL nueva): humanoide de un
+  nodo — tabla fija de 11 huesos cápsula (pelvis, spine, head, uarm/farm L+R, thigh/shin L+R; proporciones
+  × param `Height`, grosor × `Bulk`) en T-pose mirando +Z, registrados como UN grupo (`setGroup`) y 10
+  `JointSpec` propios (`setJointNodeList` con el mismo opId; specs referencian el opPath propio con índices
+  de hueso, pivotMode=2): esféricos con cono+twist (columna 20°, cuello 40°, hombros 85°, caderas 60°) y
+  revolutas con límites (codos/rodillas -2°..150°, ejes espejados por lado; rodillas eje +X ⇒ el talón va
+  hacia atrás). `Stiffness`/`Damping` = spring hertz en todos los joints (tono muscular; 0 = flojo),
+  `Anatomical Limits` toggle, `collideConnected` false. Pivotes locales invariantes al yaw global
+  (`Rotate Y` rota centros, quats y ejes de joints). Salida: menú `Output` — Capsules (malla lat-long por
+  hueso transformada por la sim, lista para render) o Points (un punto por hueso + atributos `orient`
+  float4, `scale` float3, `bone` int para instancing desde SOP). Position/Rotate solo aplican al spawn
+  (los dinámicos ignoran cambios de pose en vivo) — Reset respawnea. Mismo patrón cliente que Body SOP:
+  cookEveryFrame + cookOnStart + heartbeats (`setGroupPath` y `setJointNodeList` cada cook).
+  **Info DAT para retargeting a Mixamo/3D**: expone tabla (header + 11 filas) `name tx ty tz rx ry rz`
+  (rotación euler XYZ en grados, convención TD vía `boneQuatToEulerXYZ` local = misma que `quatToEuler
+  XYZDegrees` del Instances CHOP; local para no arrastrar headers de CHOP a un SOP)
+  con la pose mundial viva por hueso, cacheada cada cook en `myBoneXforms` (desde `getGroupTransforms`)
+  porque el DAT se consulta fuera de `execute`. Param `Bone Naming` (box3d / **mixamo**): en modo mixamo
+  la columna name usa `mixamorig:Hips/Spine/Head/LeftArm/LeftForeArm/RightArm/RightForeArm/LeftUpLeg/LeftLeg/
+  RightUpLeg/RightLeg` (índice-matched a `kBones`), para mapear por nombre a un esqueleto Mixamo importado.
+  Los SOP no llevan atributos string por punto ⇒ los nombres van por el DAT (las transforms también quedan
+  como atributos de punto `orient`/`P` en modo Points).
+
+- **Box contenedor / colisión hacia adentro (shape 6)**: nuevo core shape `6` (hollow box) en `createBodyFromDef`:
+  seis (o cinco si `openTop`) slabs finas construidas con `b3MakeOffsetBoxHull(whx,why,whz,offset)` como shapes
+  MÚLTIPLES de un mismo body (como el compound), insetadas contra la superficie externa (offset = h - ht por cara).
+  Como cada slab es un convexo sólido, un objeto DENTRO de la cavidad colisiona contra las caras internas y queda
+  contenido, mientras el conjunto puede ser static/kinematic/DINÁMICO (una caja móvil que lleva su contenido) —
+  a diferencia del Container world-level del Solver (4 paredes, estático, axis-aligned). `SpawnBody` ganó
+  `wallThickness` (default 0.1, clamp a 0.98× del semilado para que no se crucen) y `openTop` (deja abierta la
+  cara +Y para tirar cosas adentro); ambos en `sameShapeAndType`. Expuesto en el **Body SOP** como
+  `Box (Container, Inward)` (menú shape índice 6 → core 6 vía `menuShapeToCoreShape`) con params `Wall Thickness`
+  + `Open Top` (auto-grisados salvo shape container). `outputPrimitiveMesh` dibuja las 6/5 paredes reales (helper
+  `emitBox` con base-index de `getNumPoints`) así se ve la caja y su hueco; Show Collision y Debug SOP ya las
+  muestran (leen shapes vivas). Con input, el collider sigue siendo el hollow box al centroide (como box/sphere/
+  capsule); sin input genera la geometría. Disponible también por atributo de punto `shape=6` en el Spawn SOP
+  (Instances), con wallThickness/openTop en sus defaults.
+
+- **Fuerzas / atractor (ForceField + Box3D Force CHOP)**: `ForceField` en el core {type 0 attractor/1 repulsor/
+  2 wind/3 vortex, px/py/pz punto, dx/dy/dz dir o eje, strength, radius (0=∞), falloff (0 none/1 linear/2 inv²),
+  useMass, targetGroup}. `setForceNodeList(ownerKey, fields)`/`removeForceNode` — mismo heartbeat que joints
+  (forceTouch, se remueve a los ~4 advances sin cook ⇒ bypassear apaga la fuerza). `applyForceFields()` corre
+  en el loop de step ANTES de cada `b3World_Step` (box3d limpia fuerzas acumuladas post-step ⇒ hay que
+  re-aplicar cada step); para cada field itera los bodies del targetGroup (o todos los grupos), solo dinámicos,
+  y `b3Body_ApplyForceToCenter`. Por default trata strength como ACELERACIÓN (F = masa × a) ⇒ todos los bodies
+  se mueven igual sin importar la masa (como gravedad); `useMass` (toggle "Mass Independent" OFF) lo aplica como
+  fuerza cruda. Attractor tira al punto, repulsor empuja, wind es constante e ignora posición/radio, vortex es
+  tangente al eje (cross(axis, radial) normalizado). Sanea NaN antes de aplicar. Los ForceField NO tienen
+  recursos box3d ⇒ sin cleanup en destroyWorld; resuelven bodies por lookup de grupo al aplicar (grupo ausente
+  = skip). **Box3D Force CHOP** (`Box3dforce`, DLL nueva): Type, Position (o **Points SOP** = un field por punto,
+  multi-atractor), Direction/Axis, Strength (negativo invierte attract/repel), Radius, Falloff, Mass Independent,
+  Bodies (path/nombre → `findGroupKeyByPath`, vacío = todos). Salida: un sample por field con tx ty tz strength.
+  cookEveryFrame + heartbeat. Cierra el pendiente "Force CHOP".
+
+- **Update de springs en vivo (setJointNodeList)**: `sameJointStructure(a,b)` = igual que `sameJointSpec` pero
+  ignora hertz/dampingRatio/length y exige paridad de spring-enabled (`(a.hertz>0)==(b.hertz>0)`). Cuando la
+  lista nueva difiere de la actual SOLO en esos params de resorte (misma estructura, mismos ids vivos, tipos
+  distance/spherical/revolute), `setJointNodeList` llama `applyLiveSpringParams` (`b3DistanceJoint_SetSpringHertz/
+  SetSpringDampingRatio/SetLength`, y equivalentes spherical/revolute) sobre los joints vivos y actualiza el spec
+  guardado — SIN `jointsDirty`/`syncJoints` (que destruye y recrea todo). Esto es lo que evita que arrastrar
+  los sliders de spring de la página Dynamics del Joint CHOP recreen todos los joints por cook (y sirve para
+  cualquier cliente que actualice muchos resortes por frame). Cruzar el umbral hertz 0↔>0 sí recrea (cambia
+  enableSpring). Weld cae a recreate.
+
+Update 2026-07 (Mixamo ragdoll texturado + skinning en POP/GPU):
+
+- **Box3D Mixamo Ragdoll SOP** (`Box3dmixamoragdoll`, `Box3DMixamoRagdollSOP/`): ragdoll de la
+  tabla de esqueleto **horneada de `samples/Ch36_nonPBR.fbx`** (rig Mixamo de 175 cm, prefijo
+  `mixamorig1:`) — 13 cápsulas + 12 joints anatómicos, más un **retarget rígido de los 65 huesos
+  Mixamo** (posición Y rotación de bind pose horneadas; brazos/piernas/manos NO son identidad).
+  Info DAT `name tx ty tz rx ry rz` con nombres `mixamorig1:*` (param `Bone Prefix`) para manejar
+  un esqueleto importado. **Además tiene un INPUT opcional de mesh**: auto-skinea cada vértice al
+  cuerpo más cercano y saca el mesh deformado (auto-fit de escala; sale en espacio físico,
+  alineado con la colisión — mover con `Position`). `Count`/`Spacing` para N instancias en grilla.
+- **LÍMITE del SOP con texturas**: el mesh Mixamo capturado (`pCaptPath[65]`, `pCaptData`, punto
+  `pCapt`) trae `uv`/`N` como atributos de **vértice en un Vertex Buffer Object** que la API C++
+  de SOP (`getTextures`/`getNormals`) **NO expone** → el deform en SOP pierde la textura. No hay
+  Convert/Facet que lo destrabe. Por eso el camino texturado es por **POP** (leen atributos de
+  vértice en GPU).
+- **Box3D Skin GPU POP** (`Box3dskin`, `Box3DSkinPOP/`): es el ragdoll Mixamo pero como POP que
+  **deforma el mesh preservando las UVs**. Param `Solver`, input 0 = mesh, input 1 (opc) = spawn
+  points (una instancia por punto; si no, `Count`/`Spacing`). Reusa la física del header
+  compartido **`common/Box3DMixamoRig.h`** (`build`/`bindSkin`/`deform`). Forwardea `uv` (busca
+  `uv`/`Tex`/`map1`, punto o vértice) + `N` + topología COMPLETA (triángulos **y** quads; copiar
+  todo el `POP_TopologyInfo` + índice, si no los quads quedan como huecos). Instancing: n·N puntos,
+  atributos de vértice replicados en el **mismo orden reordenado** que el index buffer (si no, se
+  rompen las texturas). Deform en **CPU** (~40 instancias @ 1 substep). Gotcha: en POP usar
+  `getParDouble(name)` que devuelve valor, NO la sobrecarga `(name,&v)` (no puebla).
+- **Box3D Skin CUDA POP** (`Box3dskincuda`, `Box3DSkinCudaPOP/`): idéntico pero el deform LBS corre
+  en un **kernel CUDA** (`SkinCuda.cu`), escala a muchísimas más instancias. El POP CPU queda como
+  fallback sin CUDA. **Se compila con `build_skincuda.bat` (nvcc directo, como el ClothPOP)** — NO
+  por CMake (falta la integración CUDA de VS y Program Files pide admin); enlaza
+  `build\Release\Box3DCore.lib`, así que correr `cmake --build build --config Release` primero.
+- Normales durante el movimiento: los POPs forwardean las originales; recalcular con un **Normal
+  POP aguas abajo** (más correcto que rotarlas). Ver la memoria del proyecto para el detalle de
+  todo el camino y decisiones.
+
+- **Box3D Instances POP** (`Box3dinstancespop`, `Box3DInstancesPOP/`): la versión **POP** del
+  Instances CHOP para live performance (todo GPU/POP, sin round-trip de canales; comparte Solver =
+  mismo mundo box3d ⇒ colisiona gratis con los ragdolls Mixamo / Skin POP). Input 0 = spawn points
+  (un cuerpo rígido por punto, count variable en vivo); salida = nube de N puntos con atributos de
+  punto `P` (pos), **`rot` (float3 = rx ry rz Euler XYZ grados, formato TouchDesigner — NO
+  quaternion)**, `scale` (float3, saneada y espejada según shape como el CHOP: esfera uniforme,
+  cápsula redonda en XZ) y `v` (float3 velocidad, qualifier Direction). Atributos por punto del
+  input (todos opcionales, pisan los defaults del nodo): `scale`/`size`, `shape` (0 box/1 sphere/2
+  capsule), `density`, `friction`, `restitution`, `type` (0/1/2), `alive` (0 static/1 dynamic —
+  pisa a `type`), `bullet` (CCD), `orient` (float4 quat) o `rot` (float3 Euler XYZ deg). Params:
+  Solver (default `Box3dsolver1`), Reset, Default Shape/Size/Density/Friction/Restitution/Type,
+  CCD. Mismo patrón cliente que el Skin POP: `cookEveryFrame` + `cookOnStart` + heartbeat
+  (`setGroupPath` cada cook ⇒ bypassear lo saca del mundo en ~4 advances). Detección de cambio de
+  grupo por `defaults != last || input.opId != last || input.totalCooks != last` (reusa el parcheo
+  por índice de `setGroup`: agregar/sacar puntos al final NO resetea lo que ya simula, identidad =
+  índice de punto). Sin CUDA (solo saca transforms, no deform por vértice) ⇒ compila por **CMake**
+  ungated como el Skin POP, NO por `build_skincuda.bat`. Conversiones euler↔quat locales en el cpp
+  (mismo álgebra/rotate-order que `tdb3::quatToEulerXYZDegrees` — el POP no puede incluir
+  `TDB3Common.h` porque arrastra el header CHOP, que no está en `sdk_pop`). Shapes hull/mesh/compound
+  (3/4/5) no soportados acá (necesitan hullPoints por punto, que una nube POP no trae).
 
 Build:
 

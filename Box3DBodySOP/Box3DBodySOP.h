@@ -50,6 +50,8 @@ private:
 		float posX = 0.0f, posY = 3.0f, posZ = 0.0f;
 		int type = 0; // menu: 0 dynamic, 1 kinematic, 2 static
 		bool bullet = false; // continuous collision for fast dynamics
+		float wallThickness = 0.1f; // container shape: wall slab thickness
+		bool openTop = false;		// container shape: leave the +Y face open
 		bool jointEnabled = false;
 		float jointPivotX = 0.0f, jointPivotY = 0.0f, jointPivotZ = 0.0f;
 		bool showJointPivot = false;
@@ -61,6 +63,7 @@ private:
 		{
 			return shape != o.shape || sizeX != o.sizeX || sizeY != o.sizeY || sizeZ != o.sizeZ || posX != o.posX ||
 				   posY != o.posY || posZ != o.posZ || type != o.type || bullet != o.bullet ||
+				   wallThickness != o.wallThickness || openTop != o.openTop ||
 				   jointEnabled != o.jointEnabled ||
 				   jointPivotX != o.jointPivotX || jointPivotY != o.jointPivotY || jointPivotZ != o.jointPivotZ ||
 				   showJointPivot != o.showJointPivot || density != o.density ||

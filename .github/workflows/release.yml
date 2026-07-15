@@ -31,7 +31,10 @@ jobs:
             "plugin/Box3DSolverCHOP.dll",
             "plugin/Box3DBodySOP.dll",
             "plugin/Box3DBodiesCHOP.dll",
+            "plugin/Box3DContactsCHOP.dll",
+            "plugin/Box3DForceCHOP.dll",
             "plugin/Box3DJointCHOP.dll",
+            "plugin/Box3DRagdollSOP.dll",
             "plugin/Box3DSetJointSOP.dll",
             "plugin/Box3DDebugSOP.dll"
           )
@@ -94,7 +97,10 @@ jobs:
             "plugin/Box3DSolverCHOP.plugin/Contents/MacOS/Box3DSolverCHOP"
             "plugin/Box3DBodySOP.plugin/Contents/MacOS/Box3DBodySOP"
             "plugin/Box3DBodiesCHOP.plugin/Contents/MacOS/Box3DBodiesCHOP"
+            "plugin/Box3DContactsCHOP.plugin/Contents/MacOS/Box3DContactsCHOP"
+            "plugin/Box3DForceCHOP.plugin/Contents/MacOS/Box3DForceCHOP"
             "plugin/Box3DJointCHOP.plugin/Contents/MacOS/Box3DJointCHOP"
+            "plugin/Box3DRagdollSOP.plugin/Contents/MacOS/Box3DRagdollSOP"
             "plugin/Box3DSetJointSOP.plugin/Contents/MacOS/Box3DSetJointSOP"
             "plugin/Box3DDebugSOP.plugin/Contents/MacOS/Box3DDebugSOP"
           )

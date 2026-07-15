@@ -35,9 +35,16 @@ struct SpawnBody
 	float px = 0.0f, py = 0.0f, pz = 0.0f;
 	float qx = 0.0f, qy = 0.0f, qz = 0.0f, qw = 1.0f;
 	// 0 box, 1 sphere, 2 capsule, 3 convex hull, 4 triangle mesh (concave OK;
-	// static/kinematic only), 5 compound of convex hulls (concave OK, dynamic OK)
+	// static/kinematic only), 5 compound of convex hulls (concave OK, dynamic OK),
+	// 6 hollow box / container (thin wall slabs so collision faces INWARD —
+	// objects stay inside; dynamic OK)
 	int shape = 0;
 	float sizeX = 1.0f, sizeY = 1.0f, sizeZ = 1.0f; // full sizes (primitive shapes)
+
+	// Hollow box (shape 6): wall thickness and whether the +Y face is left open
+	// (drop things in). Ignored by other shapes.
+	float wallThickness = 0.1f;
+	bool openTop = false;
 	float density = 1.0f;
 	float friction = 0.6f;
 	float restitution = 0.0f;
@@ -83,6 +90,36 @@ struct BodyState
 	float awake;	  // 1 awake, 0 asleep
 };
 
+/// One collision event captured during the last advance() (all fixed steps of
+/// that cook are merged into one buffer, cleared at the next simulating
+/// advance). Bodies are identified by owner group key (the client node's
+/// opId) + body index inside that group; group 0 means "the world" (ground,
+/// container walls, the Solver's Collision SOP mesh, or any static outside a
+/// group).
+struct ContactEvent
+{
+	int kind = 0; // 0 begin touch, 1 end touch, 2 hit (impact above the world hit-speed threshold)
+	uint32_t groupA = 0;
+	int indexA = -1;
+	uint32_t groupB = 0;
+	int indexB = -1;
+	// World-space contact point and normal (normal points from A to B).
+	// Always filled for hits; filled for begin events when the contact
+	// manifold is available; zero for end events.
+	float px = 0.0f, py = 0.0f, pz = 0.0f;
+	float nx = 0.0f, ny = 0.0f, nz = 0.0f;
+	// Approach speed of the impact (hit events only, always positive).
+	float speed = 0.0f;
+};
+
+/// Live per-body contact info, for optional CHOP channels.
+struct BodyContactState
+{
+	float touching = 0.0f; // number of touching contacts right now
+	float impulse = 0.0f;  // sum of total normal impulses over touching manifolds (N*s)
+	float hitSpeed = 0.0f; // strongest hit approach speed captured in the last advance, 0 if none
+};
+
 /// One joint between two bodies, declared by the Solver's Joints DAT.
 /// Bodies are referenced by the registered path of their owner node (Body
 /// SOP / Instances CHOP) plus an index into that group. An empty bodyB means
@@ -97,9 +134,14 @@ struct JointSpec
 	std::string bodyB;
 	int indexB = 0;
 
-	// Where the joint pivots: 0 body A origin, 1 body B origin, 2 the explicit
-	// anchor point below. Distance joints attach at each body origin regardless
-	// (the pivot is only the world-anchor attach point).
+	// Where the joint anchors:
+	// 0 = each body's own pivot (pivot-to-pivot, Bullet style: the solver
+	//     pulls both pivots together until they coincide),
+	// 1 = body A's pivot anchors BOTH bodies,
+	// 2 = body B's pivot anchors BOTH bodies (ragdoll convention: the child
+	//     bone carries the anchor, the parent's own pivot is not consulted —
+	//     this is what lets one pivot per body articulate a whole skeleton),
+	// 3 = the explicit world-space anchor point below.
 	int pivotMode = 0;
 	float anchorX = 0.0f, anchorY = 0.0f, anchorZ = 0.0f;
 
@@ -133,6 +175,23 @@ struct JointSpec
 	bool collideConnected = false;
 };
 
+/// A force field applied to bodies before each simulation step (attractor,
+/// repulsor, directional wind, or vortex). Registered per owner node like
+/// joints; the core applies it every step until the node stops cooking.
+struct ForceField
+{
+	int type = 0; // 0 attractor (pull to point), 1 repulsor (push from point), 2 directional (wind), 3 vortex
+	float px = 0.0f, py = 0.0f, pz = 0.0f; // point (attractor/repulsor/vortex center)
+	float dx = 0.0f, dy = 1.0f, dz = 0.0f; // direction (wind) / axis (vortex)
+	float strength = 10.0f;
+	float radius = 0.0f; // influence radius; 0 = unlimited
+	int falloff = 0;	 // 0 none, 1 linear (to radius), 2 inverse-square
+	bool useMass = false; // false = same acceleration for all bodies (F = m*a), true = same force
+	// 0 = every dynamic body in the world; otherwise only the group with this
+	// key (a Body SOP / Instances node's opId).
+	uint32_t targetGroup = 0;
+};
+
 struct WorldSettings
 {
 	float gravityX = 0.0f, gravityY = -10.0f, gravityZ = 0.0f;
@@ -147,6 +206,8 @@ struct WorldSettings
 	int maxStepsPerCook = 8;
 	// Let quiet bodies fall asleep. Off = every body simulates every step.
 	bool sleep = true;
+	// Collision speed (m/s) needed to generate a hit event. Applies live.
+	float hitThreshold = 1.0f;
 };
 
 class BOX3DTD_API SolverCore
@@ -186,6 +247,12 @@ public:
 	void setJointNodeList( uint32_t ownerKey, const std::vector<JointSpec>& specs );
 	void removeJointNode( uint32_t ownerKey );
 
+	// Register/update/remove the force fields owned by a node (keyed by opId).
+	// Applied to bodies before every step; removed when the node stops cooking
+	// (same heartbeat rule as groups/joints, so bypassing turns the force off).
+	void setForceNodeList( uint32_t ownerKey, const std::vector<ForceField>& fields );
+	void removeForceNode( uint32_t ownerKey );
+
 	// Live world-space anchor points of one owned node joint (for drawing/state).
 	// Returns false while the joint is unresolved or the world is not built.
 	bool getJointAnchors( uint32_t ownerKey, int jointIndex, float outA[3], float outB[3] ) const;
@@ -205,6 +272,25 @@ public:
 	// Same as getGroupTransforms but with velocities and awake state (zeros
 	// when falling back to spawn definitions).
 	int getGroupStates( uint32_t groupKey, BodyState* out, int capacity ) const;
+
+	// Collision events captured during the last simulating advance() (empty
+	// while paused or before the world is built). Fixed-size read: query the
+	// count first, then fill.
+	int contactEventCount() const;
+	int getContactEvents( ContactEvent* out, int capacity ) const;
+
+	// Live per-body contact state of one group: touching contact count, summed
+	// normal impulse, and the strongest hit speed seen in the last advance.
+	// Zeros when the group is not built yet. Returns the number written.
+	int getGroupContactStates( uint32_t groupKey, BodyContactState* out, int capacity ) const;
+
+	// Registered TD path of a group (empty string when unknown). For the
+	// Contacts CHOP Info DAT, which reports events by node path.
+	bool getGroupPathByKey( uint32_t groupKey, std::string& outPath ) const;
+
+	// Resolve a Body SOP / Instances CHOP reference (full path or bare node
+	// name) to its group key. Used by the Contacts CHOP body filter.
+	bool findGroupKeyByPath( const char* ref, uint32_t& outKey ) const;
 
 	int totalBodyCount() const;
 	int awakeBodyCount() const;

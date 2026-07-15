@@ -29,6 +29,33 @@ struct Group
 	uint64_t lastTouch = 0;
 };
 
+// Body identity for contact events, packed into the body's userData pointer:
+// owner group key (client node opId) in the high 32 bits, index+1 in the low
+// 32 so a real body ref is never null. World statics (ground/walls/collision
+// mesh/world anchor) keep a null userData and read back as group 0.
+void* packBodyRef( uint32_t groupKey, int index )
+{
+	return (void*)( ( (uint64_t)groupKey << 32 ) | (uint32_t)( index + 1 ) );
+}
+
+void unpackBodyRef( void* userData, uint32_t& groupKey, int& index )
+{
+	uint64_t v = (uint64_t)(uintptr_t)userData;
+	if ( v == 0 )
+	{
+		groupKey = 0;
+		index = -1;
+		return;
+	}
+	groupKey = (uint32_t)( v >> 32 );
+	index = (int)(uint32_t)v - 1;
+}
+
+uint64_t bodyRefKey( uint32_t groupKey, int index )
+{
+	return ( (uint64_t)groupKey << 32 ) | (uint32_t)( index + 1 );
+}
+
 bool sameJointSpec( const JointSpec& a, const JointSpec& b )
 {
 	return a.type == b.type && a.bodyA == b.bodyA && a.indexA == b.indexA && a.bodyB == b.bodyB &&
@@ -39,6 +66,54 @@ bool sameJointSpec( const JointSpec& a, const JointSpec& b )
 		   a.lowerAngle == b.lowerAngle && a.upperAngle == b.upperAngle && a.enableConeLimit == b.enableConeLimit &&
 		   a.coneAngle == b.coneAngle && a.enableMotor == b.enableMotor && a.motorSpeed == b.motorSpeed &&
 		   a.maxMotorForce == b.maxMotorForce && a.collideConnected == b.collideConnected;
+}
+
+// Same joint EXCEPT the spring parameters (hertz / dampingRatio / length),
+// which box3d can change on a live joint without recreating it. The spring
+// enabled state (hertz > 0) must still match: toggling a spring on/off changes
+// how the joint was built, so that case falls back to a full recreate.
+bool sameJointStructure( const JointSpec& a, const JointSpec& b )
+{
+	return a.type == b.type && a.bodyA == b.bodyA && a.indexA == b.indexA && a.bodyB == b.bodyB &&
+		   a.indexB == b.indexB && a.pivotMode == b.pivotMode && a.anchorX == b.anchorX && a.anchorY == b.anchorY &&
+		   a.anchorZ == b.anchorZ && a.axisX == b.axisX && a.axisY == b.axisY && a.axisZ == b.axisZ &&
+		   ( a.hertz > 0.0f ) == ( b.hertz > 0.0f ) && a.enableLimit == b.enableLimit && a.minLength == b.minLength &&
+		   a.maxLength == b.maxLength && a.lowerAngle == b.lowerAngle && a.upperAngle == b.upperAngle &&
+		   a.enableConeLimit == b.enableConeLimit && a.coneAngle == b.coneAngle && a.enableMotor == b.enableMotor &&
+		   a.motorSpeed == b.motorSpeed && a.maxMotorForce == b.maxMotorForce &&
+		   a.collideConnected == b.collideConnected;
+}
+
+// Spring params of these joint types can be updated on a live joint id.
+bool jointTypeSupportsLiveSpring( int type )
+{
+	return type == 0 || type == 1 || type == 2; // distance, spherical, revolute
+}
+
+// Push a spec's spring params onto an existing joint without recreating it.
+void applyLiveSpringParams( b3JointId id, const JointSpec& spec )
+{
+	switch ( spec.type )
+	{
+		case 0: // distance
+			b3DistanceJoint_SetSpringHertz( id, spec.hertz );
+			b3DistanceJoint_SetSpringDampingRatio( id, spec.dampingRatio );
+			if ( spec.length >= 0.0f )
+			{
+				b3DistanceJoint_SetLength( id, spec.length );
+			}
+			break;
+		case 1: // spherical
+			b3SphericalJoint_SetSpringHertz( id, spec.hertz );
+			b3SphericalJoint_SetSpringDampingRatio( id, spec.dampingRatio );
+			break;
+		case 2: // revolute
+			b3RevoluteJoint_SetSpringHertz( id, spec.hertz );
+			b3RevoluteJoint_SetSpringDampingRatio( id, spec.dampingRatio );
+			break;
+		default:
+			break;
+	}
 }
 
 // Does a Joints DAT cell reference this group? Accepts the full TD path or
@@ -330,7 +405,7 @@ void debugAppendGroup( std::vector<float>& segments, std::vector<float>& colors,
 bool sameShapeAndType( const SpawnBody& a, const SpawnBody& b )
 {
 	if ( a.shape != b.shape || a.sizeX != b.sizeX || a.sizeY != b.sizeY || a.sizeZ != b.sizeZ || a.type != b.type ||
-		 a.bullet != b.bullet )
+		 a.bullet != b.bullet || a.wallThickness != b.wallThickness || a.openTop != b.openTop )
 	{
 		return false;
 	}
@@ -504,6 +579,11 @@ void createBodyFromDef( b3WorldId world, const SpawnBody& def, std::vector<b3Bod
 	shapeDef.density = density > 0.0f ? density : 0.0f;
 	shapeDef.baseMaterial.friction = friction > 0.0f ? friction : 0.0f;
 	shapeDef.baseMaterial.restitution = restitution > 0.0f ? restitution : 0.0f;
+	// Contact/hit events are per-shape flags OR-ed across each pair, so
+	// enabling them on group shapes is enough — pairs against the flagless
+	// world statics (ground/walls/collision mesh) still report.
+	shapeDef.enableContactEvents = true;
+	shapeDef.enableHitEvents = true;
 
 	// Sizes are full extents; box3d primitives want half extents and radii.
 	constexpr float kMinSize = 0.001f;
@@ -578,6 +658,41 @@ void createBodyFromDef( b3WorldId world, const SpawnBody& def, std::vector<b3Bod
 			// No usable piece: box of the given size so the body still exists.
 			b3BoxHull boxHull = b3MakeBoxHull( 0.5f * sizeX, 0.5f * sizeY, 0.5f * sizeZ );
 			b3CreateHullShape( bodyId, &shapeDef, &boxHull.base );
+			break;
+		}
+		case 6: // hollow box / container: thin wall slabs, collision faces INWARD
+		{
+			// Six (or five, if open-top) thin box slabs inset against the outer
+			// surface. Each slab is a solid convex shape, so objects inside the
+			// cavity collide against the inner faces and stay contained, while
+			// the whole thing can still be static, kinematic or dynamic.
+			float hx = 0.5f * sizeX;
+			float hy = 0.5f * sizeY;
+			float hz = 0.5f * sizeZ;
+			float t = def.wallThickness > 0.001f ? def.wallThickness : 0.001f;
+			float ht = 0.5f * t;
+			// Clamp so walls never overlap past the box center.
+			if ( ht > hx * 0.98f )
+				ht = hx * 0.98f;
+			if ( ht > hy * 0.98f )
+				ht = hy * 0.98f;
+			if ( ht > hz * 0.98f )
+				ht = hz * 0.98f;
+
+			auto addWall = [&]( float whx, float why, float whz, b3Vec3 offset ) {
+				b3BoxHull wall = b3MakeOffsetBoxHull( whx, why, whz, offset );
+				b3CreateHullShape( bodyId, &shapeDef, &wall.base );
+			};
+
+			addWall( ht, hy, hz, b3Vec3{ hx - ht, 0.0f, 0.0f } );  // +X
+			addWall( ht, hy, hz, b3Vec3{ -( hx - ht ), 0.0f, 0.0f } ); // -X
+			addWall( hx, hy, ht, b3Vec3{ 0.0f, 0.0f, hz - ht } );  // +Z
+			addWall( hx, hy, ht, b3Vec3{ 0.0f, 0.0f, -( hz - ht ) } ); // -Z
+			addWall( hx, ht, hz, b3Vec3{ 0.0f, -( hy - ht ), 0.0f } ); // -Y (floor)
+			if ( !def.openTop )
+			{
+				addWall( hx, ht, hz, b3Vec3{ 0.0f, hy - ht, 0.0f } ); // +Y (lid)
+			}
 			break;
 		}
 		case 4: // exact triangle mesh (concave OK); static/kinematic only
@@ -663,7 +778,7 @@ void destroyGroupBodies( Group& group )
 	destroyGroupMeshes( group );
 }
 
-void createGroupBodies( b3WorldId world, Group& group )
+void createGroupBodies( b3WorldId world, uint32_t groupKey, Group& group )
 {
 	group.bodies.clear();
 	destroyGroupMeshes( group );
@@ -671,6 +786,13 @@ void createGroupBodies( b3WorldId world, Group& group )
 	for ( const SpawnBody& def : group.defs )
 	{
 		createBodyFromDef( world, def, group.bodies, group.meshes );
+	}
+	for ( size_t i = 0; i < group.bodies.size(); ++i )
+	{
+		if ( B3_IS_NON_NULL( group.bodies[i] ) )
+		{
+			b3Body_SetUserData( group.bodies[i], packBodyRef( groupKey, (int)i ) );
+		}
 	}
 }
 
@@ -708,6 +830,9 @@ struct SolverCore::Impl
 	};
 	std::map<uint32_t, std::vector<NodeJoint>> nodeJoints;
 
+	// Force fields owned by Force CHOP nodes, keyed by node opId.
+	std::map<uint32_t, std::vector<ForceField>> forceNodes;
+
 	// Hidden static body used as the second body of world-anchored joints.
 	b3BodyId worldAnchorBody = b3_nullBodyId;
 
@@ -723,12 +848,22 @@ struct SolverCore::Impl
 	double accumulator = 0.0;
 	int64_t stepCount = 0;
 
+	// Collision events of the last simulating advance(): every fixed step of
+	// that advance appends here, and the next simulating advance clears it.
+	// Clients read it after the solver's cook (their Solver param dependency
+	// guarantees the order), so the buffer is stable for the rest of the frame.
+	std::vector<ContactEvent> events;
+	// Strongest hit approach speed per body (bodyRefKey) in the last advance,
+	// for per-instance "hit" channels.
+	std::map<uint64_t, float> hitSpeeds;
+
 	// Client liveness. Bypassed/disabled nodes never cook again and cannot
 	// unregister themselves (the SDK has no bypass notification), so advance()
 	// drops groups/joints whose owner stopped touching them. Client nodes use
 	// cookEveryFrame and re-touch on every cook.
 	uint64_t advanceCounter = 0;
 	std::map<uint32_t, uint64_t> jointTouch;
+	std::map<uint32_t, uint64_t> forceTouch;
 
 	void destroyWorld()
 	{
@@ -778,6 +913,7 @@ struct SolverCore::Impl
 								  settings.gravityZ + settings.accelZ };
 		worldDef.workerCount = settings.workerCount > 1 ? settings.workerCount : 1;
 		worldDef.enableSleep = settings.sleep;
+		worldDef.hitEventThreshold = settings.hitThreshold >= 0.0f ? settings.hitThreshold : 0.0f;
 		world = b3CreateWorld( &worldDef );
 
 		// Shapeless static body: the "other side" of world-anchored joints
@@ -853,7 +989,7 @@ struct SolverCore::Impl
 		for ( auto& entry : groups )
 		{
 			Group& group = entry.second;
-			createGroupBodies( world, group );
+			createGroupBodies( world, entry.first, group );
 		}
 
 		accumulator = 0.0;
@@ -919,6 +1055,29 @@ struct SolverCore::Impl
 		}
 		b3Vec3 worldPivotA = b3Add( xfA.p, b3RotateVector( xfA.q, jointA ) );
 		b3Vec3 worldPivotB = bodyBIsWorld ? worldPivotA : b3Add( xfB.p, b3RotateVector( xfB.q, jointB ) );
+
+		// Pivot mode overrides (see JointSpec): one shared anchor instead of
+		// pivot-to-pivot. Mode 2 is the ragdoll convention — the child bone's
+		// pivot anchors both bodies, so a bone chained on both ends (thigh:
+		// hip AND knee) articulates correctly with a single pivot per body.
+		switch ( spec.pivotMode )
+		{
+			case 1: // body A's pivot anchors both
+				worldPivotB = worldPivotA;
+				break;
+			case 2: // body B's pivot anchors both (falls back to A when B is the world)
+				if ( !bodyBIsWorld )
+				{
+					worldPivotA = worldPivotB;
+				}
+				break;
+			case 3: // explicit world-space anchor
+				worldPivotA = b3Vec3{ spec.anchorX, spec.anchorY, spec.anchorZ };
+				worldPivotB = worldPivotA;
+				break;
+			default:
+				break;
+		}
 
 		// One pivot frame per body, each at that body's OWN local pivot; the
 		// z-axis is the hinge / cone axis. The joint constrains both frames to
@@ -1162,6 +1321,222 @@ struct SolverCore::Impl
 			}
 		}
 	}
+
+	// Apply one force field to one dynamic body. `mass` is the body's mass.
+	void applyFieldToBody( const ForceField& f, b3BodyId bodyId, float mass )
+	{
+		b3Pos c = b3Body_GetWorldCenter( bodyId );
+		float fx = 0.0f, fy = 0.0f, fz = 0.0f; // acceleration (pre-mass) direction*magnitude
+
+		if ( f.type == 2 ) // directional wind: constant, position-independent
+		{
+			float len = sqrtf( f.dx * f.dx + f.dy * f.dy + f.dz * f.dz );
+			if ( len < 1e-8f )
+				return;
+			fx = f.strength * f.dx / len;
+			fy = f.strength * f.dy / len;
+			fz = f.strength * f.dz / len;
+		}
+		else
+		{
+			float dx = f.px - (float)c.x;
+			float dy = f.py - (float)c.y;
+			float dz = f.pz - (float)c.z;
+			float dist = sqrtf( dx * dx + dy * dy + dz * dz );
+			if ( dist < 1e-5f )
+				return;
+			if ( f.radius > 0.0f && dist > f.radius )
+				return;
+
+			float mag = f.strength;
+			if ( f.falloff == 1 && f.radius > 0.0f ) // linear to the radius edge
+			{
+				mag *= ( 1.0f - dist / f.radius );
+			}
+			else if ( f.falloff == 2 ) // inverse-square
+			{
+				mag *= 1.0f / ( dist * dist );
+			}
+
+			if ( f.type == 3 ) // vortex: swirl around the axis through the point
+			{
+				float ax = f.dx, ay = f.dy, az = f.dz;
+				float al = sqrtf( ax * ax + ay * ay + az * az );
+				if ( al < 1e-8f )
+					return;
+				ax /= al;
+				ay /= al;
+				az /= al;
+				// tangent = axis x radial
+				float tx = ay * dz - az * dy;
+				float ty = az * dx - ax * dz;
+				float tz = ax * dy - ay * dx;
+				float tl = sqrtf( tx * tx + ty * ty + tz * tz );
+				if ( tl < 1e-6f )
+					return;
+				fx = mag * tx / tl;
+				fy = mag * ty / tl;
+				fz = mag * tz / tl;
+			}
+			else
+			{
+				// attractor pulls toward the point, repulsor pushes away
+				float sign = f.type == 1 ? -1.0f : 1.0f;
+				fx = sign * mag * dx / dist;
+				fy = sign * mag * dy / dist;
+				fz = sign * mag * dz / dist;
+			}
+		}
+
+		// Treat the magnitude as acceleration by default (F = m*a) so every body
+		// moves the same regardless of mass, like gravity; useMass applies it as
+		// a raw force instead (heavier bodies respond less).
+		float scale = f.useMass ? 1.0f : mass;
+		b3Vec3 force = b3Vec3{ fx * scale, fy * scale, fz * scale };
+		if ( std::isfinite( force.x ) && std::isfinite( force.y ) && std::isfinite( force.z ) )
+		{
+			b3Body_ApplyForceToCenter( bodyId, force, true );
+		}
+	}
+
+	// Apply every registered force field once, before a step. box3d clears
+	// accumulated forces after each Step, so this must run every step.
+	void applyForceFields()
+	{
+		if ( forceNodes.empty() )
+		{
+			return;
+		}
+
+		for ( const auto& entry : forceNodes )
+		{
+			for ( const ForceField& f : entry.second )
+			{
+				auto applyToGroup = [&]( const Group& group ) {
+					for ( size_t i = 0; i < group.bodies.size(); ++i )
+					{
+						b3BodyId bodyId = group.bodies[i];
+						if ( !B3_IS_NON_NULL( bodyId ) || b3Body_GetType( bodyId ) != b3_dynamicBody )
+						{
+							continue;
+						}
+						float mass = b3Body_GetMass( bodyId );
+						if ( mass <= 0.0f )
+						{
+							mass = 1.0f;
+						}
+						applyFieldToBody( f, bodyId, mass );
+					}
+				};
+
+				if ( f.targetGroup != 0 )
+				{
+					auto it = groups.find( f.targetGroup );
+					if ( it != groups.end() )
+					{
+						applyToGroup( it->second );
+					}
+				}
+				else
+				{
+					for ( const auto& g : groups )
+					{
+						applyToGroup( g.second );
+					}
+				}
+			}
+		}
+	}
+
+	// Translate box3d's per-step event buffers into group/index events plus
+	// per-body hit stats. Must run right after b3World_Step, while every id in
+	// the buffers is still alive (bodies are only destroyed on client cooks,
+	// never between the fixed steps of one advance).
+	void captureContactEvents()
+	{
+		// Runaway guard: a degenerate pile can begin/end thousands of contacts
+		// per step; anything past this is noise no one visualizes anyway.
+		constexpr size_t kMaxEvents = 4096;
+
+		b3ContactEvents ev = b3World_GetContactEvents( world );
+
+		auto refFromShape = [&]( b3ShapeId shapeId, uint32_t& groupKey, int& index ) {
+			groupKey = 0;
+			index = -1;
+			if ( b3Shape_IsValid( shapeId ) )
+			{
+				unpackBodyRef( b3Body_GetUserData( b3Shape_GetBody( shapeId ) ), groupKey, index );
+			}
+		};
+
+		for ( int i = 0; i < ev.beginCount && events.size() < kMaxEvents; ++i )
+		{
+			const b3ContactBeginTouchEvent& b = ev.beginEvents[i];
+			ContactEvent e;
+			e.kind = 0;
+			refFromShape( b.shapeIdA, e.groupA, e.indexA );
+			refFromShape( b.shapeIdB, e.groupB, e.indexB );
+
+			// Point and normal from the live manifold when it survived the step.
+			if ( b3Contact_IsValid( b.contactId ) && b3Shape_IsValid( b.shapeIdA ) )
+			{
+				b3ContactData data = b3Contact_GetData( b.contactId );
+				if ( data.manifolds != nullptr && data.manifoldCount > 0 && data.manifolds[0].pointCount > 0 )
+				{
+					const b3Manifold& man = data.manifolds[0];
+					e.nx = man.normal.x;
+					e.ny = man.normal.y;
+					e.nz = man.normal.z;
+					// anchorA is world-space relative to body A's center of mass.
+					b3Pos c = b3Body_GetWorldCenter( b3Shape_GetBody( b.shapeIdA ) );
+					e.px = (float)c.x + man.points[0].anchorA.x;
+					e.py = (float)c.y + man.points[0].anchorA.y;
+					e.pz = (float)c.z + man.points[0].anchorA.z;
+				}
+			}
+			events.push_back( e );
+		}
+
+		for ( int i = 0; i < ev.endCount && events.size() < kMaxEvents; ++i )
+		{
+			const b3ContactEndTouchEvent& b = ev.endEvents[i];
+			ContactEvent e;
+			e.kind = 1;
+			// End events can reference already-destroyed shapes; refFromShape
+			// validates and falls back to the world ref.
+			refFromShape( b.shapeIdA, e.groupA, e.indexA );
+			refFromShape( b.shapeIdB, e.groupB, e.indexB );
+			events.push_back( e );
+		}
+
+		for ( int i = 0; i < ev.hitCount && events.size() < kMaxEvents; ++i )
+		{
+			const b3ContactHitEvent& h = ev.hitEvents[i];
+			ContactEvent e;
+			e.kind = 2;
+			refFromShape( h.shapeIdA, e.groupA, e.indexA );
+			refFromShape( h.shapeIdB, e.groupB, e.indexB );
+			e.px = (float)h.point.x;
+			e.py = (float)h.point.y;
+			e.pz = (float)h.point.z;
+			e.nx = h.normal.x;
+			e.ny = h.normal.y;
+			e.nz = h.normal.z;
+			e.speed = h.approachSpeed;
+			events.push_back( e );
+
+			if ( e.indexA >= 0 )
+			{
+				float& s = hitSpeeds[bodyRefKey( e.groupA, e.indexA )];
+				s = e.speed > s ? e.speed : s;
+			}
+			if ( e.indexB >= 0 )
+			{
+				float& s = hitSpeeds[bodyRefKey( e.groupB, e.indexB )];
+				s = e.speed > s ? e.speed : s;
+			}
+		}
+	}
 };
 
 SolverCore::SolverCore() : myImpl( new Impl )
@@ -1192,6 +1567,7 @@ void SolverCore::setWorldSettings( const WorldSettings& settings )
 					 settings.gravityZ + settings.accelZ } );
 		b3World_SetWorkerCount( m->world, settings.workerCount > 1 ? settings.workerCount : 1 );
 		b3World_EnableSleeping( m->world, settings.sleep );
+		b3World_SetHitEventThreshold( m->world, settings.hitThreshold >= 0.0f ? settings.hitThreshold : 0.0f );
 	}
 }
 
@@ -1347,6 +1723,10 @@ void SolverCore::setGroup( uint32_t groupKey, std::vector<SpawnBody> defs )
 				std::vector<b3BodyId> made;
 				createBodyFromDef( m->world, defs[i], made, group.meshes );
 				newBodies[i] = made.empty() ? b3_nullBodyId : made[0];
+				if ( B3_IS_NON_NULL( newBodies[i] ) )
+				{
+					b3Body_SetUserData( newBodies[i], packBodyRef( groupKey, (int)i ) );
+				}
 				if ( keep && B3_IS_NON_NULL( newBodies[i] ) )
 				{
 					b3Body_SetTransform( newBodies[i], kp, kq );
@@ -1369,6 +1749,10 @@ void SolverCore::setGroup( uint32_t groupKey, std::vector<SpawnBody> defs )
 				std::vector<b3BodyId> made;
 				createBodyFromDef( m->world, defs[i], made, group.meshes );
 				newBodies[i] = made.empty() ? b3_nullBodyId : made[0];
+				if ( B3_IS_NON_NULL( newBodies[i] ) )
+				{
+					b3Body_SetUserData( newBodies[i], packBodyRef( groupKey, (int)i ) );
+				}
 				structural = true;
 			}
 
@@ -1429,7 +1813,7 @@ void SolverCore::setGroup( uint32_t groupKey, std::vector<SpawnBody> defs )
 
 		destroyGroupBodies( group );
 		group.defs = std::move( defs );
-		createGroupBodies( m->world, group );
+		createGroupBodies( m->world, groupKey, group );
 		m->jointsDirty = true; // box3d killed any joints attached to the old bodies
 
 		for ( size_t i = 0; i < preserved.size() && i < group.bodies.size(); ++i )
@@ -1448,7 +1832,7 @@ void SolverCore::setGroup( uint32_t groupKey, std::vector<SpawnBody> defs )
 	{
 		Group& group = m->groups[groupKey];
 		group.defs = std::move( defs );
-		createGroupBodies( m->world, group );
+		createGroupBodies( m->world, groupKey, group );
 		m->jointsDirty = true; // unresolved joint rows may reference this group
 		return;
 	}
@@ -1492,13 +1876,15 @@ void SolverCore::setGroupPath( uint32_t groupKey, const char* path )
 {
 	Impl* m = myImpl;
 	auto it = m->groups.find( groupKey );
-	if ( it == m->groups.end() || path == nullptr )
+	if ( it == m->groups.end() )
 	{
 		return;
 	}
-	// Clients call this every cook, so it doubles as the group heartbeat.
+	// Clients call this every cook, so it doubles as the group heartbeat — refresh
+	// it even if no path was supplied, or a null opPath would let the group be
+	// dropped as stale within a few advances.
 	it->second.lastTouch = m->advanceCounter;
-	if ( it->second.path != path )
+	if ( path != nullptr && it->second.path != path )
 	{
 		it->second.path = path;
 		m->jointsDirty = true; // joint rows referencing this path can resolve now
@@ -1526,20 +1912,45 @@ void SolverCore::setJointNodeList( uint32_t ownerKey, const std::vector<JointSpe
 
 	if ( it != m->nodeJoints.end() )
 	{
-		const std::vector<Impl::NodeJoint>& current = it->second;
+		std::vector<Impl::NodeJoint>& current = it->second;
 		if ( current.size() == specs.size() )
 		{
-			bool same = true;
+			bool identical = true;	// nothing changed at all
+			bool springOnly = true; // only spring params (hertz/damping/length) changed
+			bool liveUpdatable = B3_IS_NON_NULL( m->world );
 			for ( size_t i = 0; i < specs.size(); ++i )
 			{
 				if ( !sameJointSpec( current[i].spec, specs[i] ) )
 				{
-					same = false;
-					break;
+					identical = false;
+				}
+				if ( !sameJointStructure( current[i].spec, specs[i] ) || !jointTypeSupportsLiveSpring( specs[i].type ) )
+				{
+					springOnly = false;
+				}
+				if ( !( B3_IS_NON_NULL( current[i].id ) && b3Joint_IsValid( current[i].id ) ) )
+				{
+					liveUpdatable = false;
 				}
 			}
-			if ( same )
+
+			if ( identical )
 			{
+				return;
+			}
+
+			// Only the spring stiffness/damping/length changed on already-built
+			// joints: update them on the live joints instead of destroying and
+			// recreating everything. This is what keeps dragging a Cloth's
+			// Stiffness/Damping (or the Joint CHOP spring sliders) from
+			// rebuilding thousands of joints every cook and stalling the sim.
+			if ( springOnly && liveUpdatable )
+			{
+				for ( size_t i = 0; i < specs.size(); ++i )
+				{
+					applyLiveSpringParams( current[i].id, specs[i] );
+					current[i].spec = specs[i];
+				}
 				return;
 			}
 		}
@@ -1577,6 +1988,26 @@ void SolverCore::removeJointNode( uint32_t ownerKey )
 	}
 	m->nodeJoints.erase( it );
 	m->jointTouch.erase( ownerKey );
+}
+
+void SolverCore::setForceNodeList( uint32_t ownerKey, const std::vector<ForceField>& fields )
+{
+	Impl* m = myImpl;
+	if ( fields.empty() )
+	{
+		removeForceNode( ownerKey );
+		return;
+	}
+	// Clients call this every cook, so it doubles as the force heartbeat.
+	m->forceTouch[ownerKey] = m->advanceCounter;
+	m->forceNodes[ownerKey] = fields; // force fields read fresh each step; no diffing needed
+}
+
+void SolverCore::removeForceNode( uint32_t ownerKey )
+{
+	Impl* m = myImpl;
+	m->forceNodes.erase( ownerKey );
+	m->forceTouch.erase( ownerKey );
 }
 
 bool SolverCore::getJointAnchors( uint32_t ownerKey, int jointIndex, float outA[3], float outB[3] ) const
@@ -1735,6 +2166,19 @@ void SolverCore::advance( double dtSeconds, bool simulate )
 		{
 			removeJointNode( key );
 		}
+
+		stale.clear();
+		for ( const auto& entry : m->forceTouch )
+		{
+			if ( m->advanceCounter - entry.second > kStaleAdvances )
+			{
+				stale.push_back( entry.first );
+			}
+		}
+		for ( uint32_t key : stale )
+		{
+			removeForceNode( key );
+		}
 	}
 
 	if ( m->dirty )
@@ -1746,6 +2190,11 @@ void SolverCore::advance( double dtSeconds, bool simulate )
 	{
 		m->syncJoints();
 	}
+
+	// New advance = new event window: events already reported must not repeat,
+	// even when paused or when no fixed step fits into this cook's delta.
+	m->events.clear();
+	m->hitSpeeds.clear();
 
 	if ( !simulate )
 	{
@@ -1764,7 +2213,9 @@ void SolverCore::advance( double dtSeconds, bool simulate )
 	while ( m->accumulator >= kFixedTimeStep && steps < maxSteps )
 	{
 		m->retargetKinematicBodies();
+		m->applyForceFields();
 		b3World_Step( m->world, (float)kFixedTimeStep, m->settings.subSteps );
+		m->captureContactEvents();
 		m->accumulator -= kFixedTimeStep;
 		++steps;
 		++m->stepCount;
@@ -1855,6 +2306,124 @@ int SolverCore::getGroupStates( uint32_t groupKey, BodyState* out, int capacity 
 		out[i] = BodyState{ d.px, d.py, d.pz, d.qx, d.qy, d.qz, d.qw, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
 	}
 	return count;
+}
+
+int SolverCore::contactEventCount() const
+{
+	return (int)myImpl->events.size();
+}
+
+int SolverCore::getContactEvents( ContactEvent* out, int capacity ) const
+{
+	const Impl* m = myImpl;
+	int count = (int)m->events.size() < capacity ? (int)m->events.size() : capacity;
+	for ( int i = 0; i < count; ++i )
+	{
+		out[i] = m->events[i];
+	}
+	return count;
+}
+
+int SolverCore::getGroupContactStates( uint32_t groupKey, BodyContactState* out, int capacity ) const
+{
+	const Impl* m = myImpl;
+	auto it = m->groups.find( groupKey );
+	if ( it == m->groups.end() )
+	{
+		return 0;
+	}
+
+	const Group& group = it->second;
+
+	// Not built yet (world rebuild pending): report zeros, same fallback
+	// convention as getGroupStates.
+	if ( group.bodies.empty() )
+	{
+		int count = (int)group.defs.size() < capacity ? (int)group.defs.size() : capacity;
+		for ( int i = 0; i < count; ++i )
+		{
+			out[i] = BodyContactState{};
+		}
+		return count;
+	}
+
+	int count = (int)group.bodies.size() < capacity ? (int)group.bodies.size() : capacity;
+	std::vector<b3ContactData> contacts;
+	for ( int i = 0; i < count; ++i )
+	{
+		BodyContactState s;
+		b3BodyId bodyId = group.bodies[i];
+		if ( B3_IS_NON_NULL( bodyId ) )
+		{
+			int cap = b3Body_GetContactCapacity( bodyId );
+			if ( cap > 0 )
+			{
+				contacts.resize( cap );
+				int n = b3Body_GetContactData( bodyId, contacts.data(), cap );
+				for ( int c = 0; c < n; ++c )
+				{
+					// A contact is "touching" when any manifold has points;
+					// impulses sum over every point (speculative points with a
+					// zero impulse contribute nothing).
+					bool touching = false;
+					for ( int mi = 0; mi < contacts[c].manifoldCount; ++mi )
+					{
+						const b3Manifold& man = contacts[c].manifolds[mi];
+						if ( man.pointCount > 0 )
+						{
+							touching = true;
+						}
+						for ( int p = 0; p < man.pointCount; ++p )
+						{
+							s.impulse += man.points[p].totalNormalImpulse;
+						}
+					}
+					if ( touching )
+					{
+						s.touching += 1.0f;
+					}
+				}
+			}
+
+			auto hit = m->hitSpeeds.find( bodyRefKey( groupKey, i ) );
+			if ( hit != m->hitSpeeds.end() )
+			{
+				s.hitSpeed = hit->second;
+			}
+		}
+		out[i] = s;
+	}
+	return count;
+}
+
+bool SolverCore::getGroupPathByKey( uint32_t groupKey, std::string& outPath ) const
+{
+	const Impl* m = myImpl;
+	auto it = m->groups.find( groupKey );
+	if ( it == m->groups.end() )
+	{
+		return false;
+	}
+	outPath = it->second.path;
+	return true;
+}
+
+bool SolverCore::findGroupKeyByPath( const char* ref, uint32_t& outKey ) const
+{
+	const Impl* m = myImpl;
+	if ( ref == nullptr || ref[0] == '\0' )
+	{
+		return false;
+	}
+	for ( const auto& entry : m->groups )
+	{
+		if ( pathMatches( entry.second.path, ref ) )
+		{
+			outKey = entry.first;
+			return true;
+		}
+	}
+	return false;
 }
 
 int SolverCore::totalBodyCount() const
