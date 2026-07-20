@@ -13,8 +13,5 @@ imgui.ini
 .DS_Store
 Thumbs.db
 
-# Local-only WIP — kept out of the shared branch (see conversation)
-/Box3DClothSOP/
-/Box3DClothPOP/
+# Local-only SDK copy
 /sdk_pop/
-/build_clothpop.bat

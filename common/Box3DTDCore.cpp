@@ -864,6 +864,22 @@ struct SolverCore::Impl
 	uint64_t advanceCounter = 0;
 	std::map<uint32_t, uint64_t> jointTouch;
 	std::map<uint32_t, uint64_t> forceTouch;
+	std::map<uint32_t, uint64_t> grabTouch;
+
+	// One live grab constraint (see GrabSpec): a hidden shapeless kinematic
+	// anchor driven to the target each step + a zero-length spring distance
+	// joint from the grabbed body's local point to it. `body` remembers which
+	// b3 body the joint was built against — when the group patches that index
+	// to a new body (box3d destroyed the old one and our joint with it) the
+	// stale handles are dropped and the constraint is rebuilt lazily.
+	struct LiveGrab
+	{
+		GrabSpec spec;
+		b3BodyId body = b3_nullBodyId;
+		b3BodyId anchor = b3_nullBodyId;
+		b3JointId joint = b3_nullJointId;
+	};
+	std::map<uint32_t, std::vector<LiveGrab>> grabNodes;
 
 	void destroyWorld()
 	{
@@ -879,6 +895,15 @@ struct SolverCore::Impl
 			for ( NodeJoint& nj : entry.second )
 			{
 				nj.id = b3_nullJointId;
+			}
+		}
+		for ( auto& entry : grabNodes )
+		{
+			for ( LiveGrab& g : entry.second )
+			{
+				g.body = b3_nullBodyId;
+				g.anchor = b3_nullBodyId;
+				g.joint = b3_nullJointId;
 			}
 		}
 		liveJointCount = 0;
@@ -1057,7 +1082,7 @@ struct SolverCore::Impl
 		b3Vec3 worldPivotB = bodyBIsWorld ? worldPivotA : b3Add( xfB.p, b3RotateVector( xfB.q, jointB ) );
 
 		// Pivot mode overrides (see JointSpec): one shared anchor instead of
-		// pivot-to-pivot. Mode 2 is the ragdoll convention — the child bone's
+		// pivot-to-pivot. Mode 2 is the child-bone convention — the child bone's
 		// pivot anchors both bodies, so a bone chained on both ends (thigh:
 		// hip AND knee) articulates correctly with a single pivot per body.
 		switch ( spec.pivotMode )
@@ -1318,6 +1343,120 @@ struct SolverCore::Impl
 						   fabsf( (float)( p.z - target.p.z ) ) > kPosEps || dq > kRotEps;
 				}
 				b3Body_SetTargetTransform( group.bodies[i], target, (float)kFixedTimeStep, wake );
+			}
+		}
+	}
+
+	// Tear down one grab's live constraint. The joint dies with the grabbed
+	// body when a group patch recreates it, so validity is re-checked instead
+	// of trusting the stored handles.
+	void destroyGrabConstraint( LiveGrab& g )
+	{
+		if ( B3_IS_NON_NULL( g.joint ) && b3Joint_IsValid( g.joint ) )
+		{
+			b3DestroyJoint( g.joint, true ); // wake the released body so it falls/flings
+		}
+		if ( B3_IS_NON_NULL( g.anchor ) && b3Body_IsValid( g.anchor ) )
+		{
+			b3DestroyBody( g.anchor );
+		}
+		g.joint = b3_nullJointId;
+		g.anchor = b3_nullBodyId;
+		g.body = b3_nullBodyId;
+	}
+
+	// Create (or re-create) the live constraint of every registered grab.
+	// Lazy: a grab whose group/body is not resolvable yet — or whose body was
+	// recreated by a group patch, killing the old joint — retries on every
+	// advance while its spec is present. Runs after the rebuild handling so a
+	// fresh world re-acquires all grabs immediately.
+	void updateGrabConstraints()
+	{
+		if ( grabNodes.empty() || !B3_IS_NON_NULL( world ) )
+		{
+			return;
+		}
+		for ( auto& entry : grabNodes )
+		{
+			for ( LiveGrab& g : entry.second )
+			{
+				b3BodyId body = b3_nullBodyId;
+				auto git = groups.find( g.spec.groupKey );
+				if ( git != groups.end() && g.spec.bodyIndex >= 0 &&
+					 g.spec.bodyIndex < (int)git->second.bodies.size() )
+				{
+					body = git->second.bodies[g.spec.bodyIndex];
+				}
+
+				// Grabbed body gone or replaced: drop stale handles (the old
+				// joint died with the old body; the anchor is still ours).
+				if ( B3_IS_NON_NULL( g.body ) && ( !B3_IS_NON_NULL( body ) || !B3_ID_EQUALS( g.body, body ) ) )
+				{
+					destroyGrabConstraint( g );
+				}
+				if ( !B3_IS_NON_NULL( body ) || !b3Body_IsValid( body ) )
+				{
+					continue;
+				}
+
+				if ( !B3_IS_NON_NULL( g.joint ) )
+				{
+					// Anchor: shapeless kinematic spawned AT the target.
+					b3BodyDef anchorDef = b3DefaultBodyDef();
+					anchorDef.type = b3_kinematicBody;
+					anchorDef.position = b3Pos{ g.spec.targetX, g.spec.targetY, g.spec.targetZ };
+					g.anchor = b3CreateBody( world, &anchorDef );
+
+					b3DistanceJointDef def = b3DefaultDistanceJointDef();
+					def.base.bodyIdA = body;
+					def.base.bodyIdB = g.anchor;
+					def.base.localFrameA = b3Transform_identity;
+					def.base.localFrameA.p = b3Vec3{ g.spec.localX, g.spec.localY, g.spec.localZ };
+					def.base.localFrameB = b3Transform_identity;
+					def.base.collideConnected = false;
+					def.length = 0.0f;
+					if ( g.spec.hertz > 0.0f )
+					{
+						def.enableSpring = true;
+						def.hertz = g.spec.hertz;
+						def.dampingRatio = g.spec.dampingRatio;
+					}
+					g.joint = b3CreateDistanceJoint( world, &def );
+					g.body = body;
+					b3Body_SetAwake( body, true );
+				}
+			}
+		}
+	}
+
+	// Drive every grab anchor toward its target — called before each step,
+	// like the kinematic retarget, so dragging imparts real velocity. Wakes
+	// the grabbed body when the target actually moved (a sleeping body would
+	// otherwise ignore the pull).
+	void retargetGrabAnchors()
+	{
+		for ( auto& entry : grabNodes )
+		{
+			for ( LiveGrab& g : entry.second )
+			{
+				if ( !B3_IS_NON_NULL( g.anchor ) || !b3Body_IsValid( g.anchor ) )
+				{
+					continue;
+				}
+				b3WorldTransform target = b3WorldTransform_identity;
+				target.p = b3Pos{ std::isfinite( g.spec.targetX ) ? g.spec.targetX : 0.0f,
+								  std::isfinite( g.spec.targetY ) ? g.spec.targetY : 0.0f,
+								  std::isfinite( g.spec.targetZ ) ? g.spec.targetZ : 0.0f };
+				b3Pos p = b3Body_GetPosition( g.anchor );
+				constexpr float kPosEps = 1e-6f;
+				bool moved = fabsf( (float)( p.x - target.p.x ) ) > kPosEps ||
+							 fabsf( (float)( p.y - target.p.y ) ) > kPosEps ||
+							 fabsf( (float)( p.z - target.p.z ) ) > kPosEps;
+				b3Body_SetTargetTransform( g.anchor, target, (float)kFixedTimeStep, false );
+				if ( moved && B3_IS_NON_NULL( g.body ) && b3Body_IsValid( g.body ) )
+				{
+					b3Body_SetAwake( g.body, true );
+				}
 			}
 		}
 	}
@@ -2010,6 +2149,67 @@ void SolverCore::removeForceNode( uint32_t ownerKey )
 	m->forceTouch.erase( ownerKey );
 }
 
+void SolverCore::setGrabList( uint32_t ownerKey, const std::vector<GrabSpec>& grabs )
+{
+	Impl* m = myImpl;
+	if ( grabs.empty() )
+	{
+		removeGrabNode( ownerKey );
+		return;
+	}
+	// Clients call this every cook, so it doubles as the grab heartbeat.
+	m->grabTouch[ownerKey] = m->advanceCounter;
+
+	std::vector<Impl::LiveGrab>& live = m->grabNodes[ownerKey];
+	const size_t common = live.size() < grabs.size() ? live.size() : grabs.size();
+	for ( size_t i = 0; i < common; ++i )
+	{
+		Impl::LiveGrab& g = live[i];
+		const GrabSpec& spec = grabs[i];
+		bool sameHold = g.spec.groupKey == spec.groupKey && g.spec.bodyIndex == spec.bodyIndex &&
+						g.spec.localX == spec.localX && g.spec.localY == spec.localY &&
+						g.spec.localZ == spec.localZ && ( g.spec.hertz > 0.0f ) == ( spec.hertz > 0.0f );
+		if ( !sameHold )
+		{
+			// Grabbed a different point/body (or crossed rigid<->spring):
+			// release and let advance() build the new constraint.
+			m->destroyGrabConstraint( g );
+		}
+		else if ( B3_IS_NON_NULL( g.joint ) && b3Joint_IsValid( g.joint ) && spec.hertz > 0.0f &&
+				  ( g.spec.hertz != spec.hertz || g.spec.dampingRatio != spec.dampingRatio ) )
+		{
+			// Same hold, different feel: retune the spring live.
+			b3DistanceJoint_SetSpringHertz( g.joint, spec.hertz );
+			b3DistanceJoint_SetSpringDampingRatio( g.joint, spec.dampingRatio );
+		}
+		g.spec = spec; // target (and spring numbers) always take the new values
+	}
+	for ( size_t i = grabs.size(); i < live.size(); ++i )
+	{
+		m->destroyGrabConstraint( live[i] ); // released holds
+	}
+	live.resize( grabs.size() );
+	for ( size_t i = common; i < grabs.size(); ++i )
+	{
+		live[i].spec = grabs[i]; // new holds; constraints built lazily in advance()
+	}
+}
+
+void SolverCore::removeGrabNode( uint32_t ownerKey )
+{
+	Impl* m = myImpl;
+	auto it = m->grabNodes.find( ownerKey );
+	if ( it != m->grabNodes.end() )
+	{
+		for ( Impl::LiveGrab& g : it->second )
+		{
+			m->destroyGrabConstraint( g );
+		}
+		m->grabNodes.erase( it );
+	}
+	m->grabTouch.erase( ownerKey );
+}
+
 bool SolverCore::getJointAnchors( uint32_t ownerKey, int jointIndex, float outA[3], float outB[3] ) const
 {
 	const Impl* m = myImpl;
@@ -2179,6 +2379,19 @@ void SolverCore::advance( double dtSeconds, bool simulate )
 		{
 			removeForceNode( key );
 		}
+
+		stale.clear();
+		for ( const auto& entry : m->grabTouch )
+		{
+			if ( m->advanceCounter - entry.second > kStaleAdvances )
+			{
+				stale.push_back( entry.first );
+			}
+		}
+		for ( uint32_t key : stale )
+		{
+			removeGrabNode( key );
+		}
 	}
 
 	if ( m->dirty )
@@ -2209,10 +2422,16 @@ void SolverCore::advance( double dtSeconds, bool simulate )
 	}
 	int maxSteps = m->settings.maxStepsPerCook > 0 ? m->settings.maxStepsPerCook : 1;
 
+	// (Re)build any pending grab constraints now that the world/groups are
+	// settled for this advance — before stepping so a fresh grab bites this
+	// same frame.
+	m->updateGrabConstraints();
+
 	int steps = 0;
 	while ( m->accumulator >= kFixedTimeStep && steps < maxSteps )
 	{
 		m->retargetKinematicBodies();
+		m->retargetGrabAnchors();
 		m->applyForceFields();
 		b3World_Step( m->world, (float)kFixedTimeStep, m->settings.subSteps );
 		m->captureContactEvents();

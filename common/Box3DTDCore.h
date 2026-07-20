@@ -138,7 +138,7 @@ struct JointSpec
 	// 0 = each body's own pivot (pivot-to-pivot, Bullet style: the solver
 	//     pulls both pivots together until they coincide),
 	// 1 = body A's pivot anchors BOTH bodies,
-	// 2 = body B's pivot anchors BOTH bodies (ragdoll convention: the child
+	// 2 = body B's pivot anchors BOTH bodies (child-bone convention: the child
 	//     bone carries the anchor, the parent's own pivot is not consulted —
 	//     this is what lets one pivot per body articulate a whole skeleton),
 	// 3 = the explicit world-space anchor point below.
@@ -173,6 +173,25 @@ struct JointSpec
 	float maxMotorForce = 0.0f;
 
 	bool collideConnected = false;
+};
+
+/// A live grab (mouse-joint style): a zero-length spring constraint between a
+/// body-local point of one group body and a moving world target. The core
+/// drives the target through a hidden shapeless KINEMATIC body retargeted with
+/// b3Body_SetTargetTransform every step, so dragging imparts real velocity and
+/// releasing keeps the momentum. Registered per owner node like forces; the
+/// target/spring update live (no joint recreation) as long as the grabbed
+/// body-point stays the same.
+struct GrabSpec
+{
+	uint32_t groupKey = 0; // group that owns the grabbed body
+	int bodyIndex = 0;	   // body inside that group
+	// grabbed point, in the body's local frame (latched at grab time)
+	float localX = 0.0f, localY = 0.0f, localZ = 0.0f;
+	// world-space target the grabbed point is pulled toward (moves every cook)
+	float targetX = 0.0f, targetY = 0.0f, targetZ = 0.0f;
+	float hertz = 15.0f;	   // spring strength; 0 = rigid hold
+	float dampingRatio = 1.0f; // spring damping
 };
 
 /// A force field applied to bodies before each simulation step (attractor,
@@ -252,6 +271,15 @@ public:
 	// (same heartbeat rule as groups/joints, so bypassing turns the force off).
 	void setForceNodeList( uint32_t ownerKey, const std::vector<ForceField>& fields );
 	void removeForceNode( uint32_t ownerKey );
+
+	// Register/update/remove the live grabs owned by a node (keyed by opId).
+	// Call every cook with the current list: matching grabs (same group/body/
+	// local point) keep their live constraint and only move the target /
+	// retune the spring; changed or removed entries recreate or release.
+	// Same heartbeat rule as forces — a node that stops cooking drops its
+	// grabs (with their momentum) within a few frames.
+	void setGrabList( uint32_t ownerKey, const std::vector<GrabSpec>& grabs );
+	void removeGrabNode( uint32_t ownerKey );
 
 	// Live world-space anchor points of one owned node joint (for drawing/state).
 	// Returns false while the joint is unresolved or the world is not built.

@@ -122,7 +122,7 @@ JointSpec readSharedSpec( const OP_Inputs* inputs )
 	spec.collideConnected = inputs->getParInt( CollideName ) != 0;
 
 	// Anchor placement: pivot-to-pivot (default), one body's pivot for both
-	// sides (mode "Body B Pivot" is the ragdoll convention — the child bone
+	// sides (mode "Body B Pivot" is the child-bone convention — the child bone
 	// carries the anchor), or an explicit world point.
 	spec.pivotMode = inputs->getParInt( PivotmodeName );
 	inputs->getParDouble3( AnchorName, x, y, z );
@@ -516,7 +516,7 @@ void Box3DJointCHOP::setupParameters( OP_ParameterManager* manager, void* )
 	}
 
 	{
-		// Anchor placement. "Body B Pivot" is the ragdoll convention: the
+		// Anchor placement. "Body B Pivot" is the child-bone convention: the
 		// child bone's pivot anchors both bodies, so bones jointed on both
 		// ends (thigh: hip + knee) articulate correctly with one pivot each.
 		OP_StringParameter p;

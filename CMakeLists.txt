@@ -131,14 +131,10 @@ add_td_plugin(Box3DForceCHOP)
 add_td_plugin(Box3DSetJointSOP)
 add_td_plugin(Box3DDebugSOP)
 
-# NOTE: the ragdoll / cloth / Mixamo-skin operators live in a SEPARATE PRIVATE
-# repo that consumes this project via add_subdirectory (it reuses Box3DCore and
-# add_td_plugin). They are intentionally NOT built here.
-
 # ---- Box3D Instances (POP) ----
 # GPU/POP rigid-body instancing: one body per input point, output is an N-point
 # cloud with each body's live pose (P, rot, scale, v). CPU only (no vertex
-# deform), so it builds through CMake like the Skin POP — no nvcc.
+# deform), so it builds through CMake — no nvcc.
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Box3DInstancesPOP")
 	add_library(Box3DInstancesPOP MODULE
 		Box3DInstancesPOP/Box3DInstancesPOP.cpp
@@ -156,7 +152,3 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Box3DInstancesPOP")
 	target_link_libraries(Box3DInstancesPOP PRIVATE Box3DCore)
 endif()
 
-# ---- Box3D Cloth GPU (POP, CUDA) ----
-# GPU POP plugins are built directly with nvcc (see build_clothpop.bat /
-# build_skincuda.bat), NOT through CMake — the Visual Studio CUDA toolset
-# integration isn't required that way. Kept out of the CMake build on purpose.

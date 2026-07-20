@@ -16,9 +16,7 @@ Instances CHOP** (masas para instancing, count variable en vivo), **Box3D Joint 
 (hasta 8 pares + series, estilo Constant CHOP), **Box3D Set Joint SOP** (pivote como
 atributos afín-invariantes en la cadena SOP), **Box3D Debug SOP** (wireframe del mundo de
 colisión real + joints, colores por estado), **Box3D Contacts CHOP** (eventos de
-colisión: un sample por evento begin/end/hit con punto, normal y velocidad de impacto), **Box3D Force CHOP** (campos de fuerza: atractor/repulsor/viento/vórtice sobre las instancias),
-**Box3D Ragdoll SOP** (humanoide articulado completo en un nodo: 11 cápsulas + 10 joints
-con límites anatómicos; salida geometría simulada o puntos para instancing).
+colisión: un sample por evento begin/end/hit con punto, normal y velocidad de impacto), **Box3D Force CHOP** (campos de fuerza: atractor/repulsor/viento/vórtice sobre las instancias).
 Todo sobre `Box3DCore.dll` (registro de mundos, box3d estático adentro). Pendiente:
 filtrado de colisiones (categorías/máscaras), sensores, COMP wrappers .tox.
 
@@ -176,33 +174,11 @@ Update 2026-07:
   Uso típico de visualización: hitspeed como trigger de flash/audio (dura 1 frame), el Contacts CHOP como fuente
   de partículas/decals en el punto de impacto (px..pz + normal), `touching` para tintar instancias en reposo.
 
-- **Ragdoll (pivotMode + Ragdoll SOP)**: `JointSpec.pivotMode` ahora se respeta en `createJointFromSpec`:
+- **pivotMode de joints**: `JointSpec.pivotMode` ahora se respeta en `createJointFromSpec`:
   0 = pivot-a-pivot (comportamiento histórico), 1 = el pivote de A ancla ambos, 2 = el pivote de B ancla
-  ambos (convención ragdoll: el hueso HIJO lleva el ancla y el pivote del padre no se consulta — así un
-  body con dos articulaciones (muslo: cadera+rodilla) funciona con UN pivote), 3 = ancla mundial explícita
-  (`anchorX/Y/Z`). En el Joint CHOP: menú `Pivot` (each/bodya/bodyb/anchor) + param `Anchor` (se habilita
-  solo en modo anchor), página Joint. **Box3D Ragdoll SOP** (`Box3dragdoll`, DLL nueva): humanoide de un
-  nodo — tabla fija de 11 huesos cápsula (pelvis, spine, head, uarm/farm L+R, thigh/shin L+R; proporciones
-  × param `Height`, grosor × `Bulk`) en T-pose mirando +Z, registrados como UN grupo (`setGroup`) y 10
-  `JointSpec` propios (`setJointNodeList` con el mismo opId; specs referencian el opPath propio con índices
-  de hueso, pivotMode=2): esféricos con cono+twist (columna 20°, cuello 40°, hombros 85°, caderas 60°) y
-  revolutas con límites (codos/rodillas -2°..150°, ejes espejados por lado; rodillas eje +X ⇒ el talón va
-  hacia atrás). `Stiffness`/`Damping` = spring hertz en todos los joints (tono muscular; 0 = flojo),
-  `Anatomical Limits` toggle, `collideConnected` false. Pivotes locales invariantes al yaw global
-  (`Rotate Y` rota centros, quats y ejes de joints). Salida: menú `Output` — Capsules (malla lat-long por
-  hueso transformada por la sim, lista para render) o Points (un punto por hueso + atributos `orient`
-  float4, `scale` float3, `bone` int para instancing desde SOP). Position/Rotate solo aplican al spawn
-  (los dinámicos ignoran cambios de pose en vivo) — Reset respawnea. Mismo patrón cliente que Body SOP:
-  cookEveryFrame + cookOnStart + heartbeats (`setGroupPath` y `setJointNodeList` cada cook).
-  **Info DAT para retargeting a Mixamo/3D**: expone tabla (header + 11 filas) `name tx ty tz rx ry rz`
-  (rotación euler XYZ en grados, convención TD vía `boneQuatToEulerXYZ` local = misma que `quatToEuler
-  XYZDegrees` del Instances CHOP; local para no arrastrar headers de CHOP a un SOP)
-  con la pose mundial viva por hueso, cacheada cada cook en `myBoneXforms` (desde `getGroupTransforms`)
-  porque el DAT se consulta fuera de `execute`. Param `Bone Naming` (box3d / **mixamo**): en modo mixamo
-  la columna name usa `mixamorig:Hips/Spine/Head/LeftArm/LeftForeArm/RightArm/RightForeArm/LeftUpLeg/LeftLeg/
-  RightUpLeg/RightLeg` (índice-matched a `kBones`), para mapear por nombre a un esqueleto Mixamo importado.
-  Los SOP no llevan atributos string por punto ⇒ los nombres van por el DAT (las transforms también quedan
-  como atributos de punto `orient`/`P` en modo Points).
+  ambos (el hueso HIJO lleva el ancla y el pivote del padre no se consulta — así un body con dos
+  articulaciones funciona con UN pivote), 3 = ancla mundial explícita (`anchorX/Y/Z`). En el Joint CHOP:
+  menú `Pivot` (each/bodya/bodyb/anchor) + param `Anchor` (se habilita solo en modo anchor), página Joint.
 
 - **Box contenedor / colisión hacia adentro (shape 6)**: nuevo core shape `6` (hollow box) en `createBodyFromDef`:
   seis (o cinco si `openTop`) slabs finas construidas con `b3MakeOffsetBoxHull(whx,why,whz,offset)` como shapes
@@ -235,7 +211,22 @@ Update 2026-07:
   Bodies (path/nombre → `findGroupKeyByPath`, vacío = todos). Salida: un sample por field con tx ty tz strength.
   cookEveryFrame + heartbeat. Cierra el pendiente "Force CHOP".
 
-- **Update de springs en vivo (setJointNodeList)**: `sameJointStructure(a,b)` = igual que `sameJointSpec` pero
+- **Grabs (mouse-joint) en el core**: `GrabSpec {groupKey, bodyIndex, local point, target mundial, hertz,
+  damping}` + `setGrabList(ownerKey, grabs)`/`removeGrabNode` (heartbeat como las fuerzas). Cada grab =
+  un body KINEMÁTICO oculto sin shape (el ancla) + un distance joint largo 0 con spring entre el punto
+  local del body agarrado y el ancla. El ancla se re-targetea con `b3Body_SetTargetTransform` antes de
+  CADA step (como los kinematics) ⇒ arrastrar imparte velocidad real y soltar conserva el momentum. El
+  target y el spring se actualizan EN VIVO sin recrear el joint mientras el hold (grupo+índice+punto
+  local) no cambie; si el body agarrado se recrea por un patch del grupo, el constraint se rebuildea
+  lazy en el próximo advance (los handles viejos se validan con `b3Joint_IsValid`/`B3_ID_EQUALS` — el
+  joint viejo muere con el body). `updateGrabConstraints()` corre en advance() tras rebuild/syncJoints;
+  los grabs NO participan de `syncJoints` (specs de joints estables vs targets que cambian por frame).
+
+- **Perform mode (gotcha de cooking)**: en Perform TD puede no cookear nodos dead-end (Force/Joint sin
+  consumidores) aunque tengan `cookEveryFrame`+`cookOnStart` — con el editor abierto los viewers los
+  cookean de rebote y "parece que anda"; en Perform el heartbeat los remueve a los ~4 advances. Solución
+  de red (NO de código): darles un consumidor real — mergear los CHOPs dead-end en un Null y exportar/
+  referenciar un canal desde algo de la cadena de render (la referencia crea la dependencia de cook). `sameJointStructure(a,b)` = igual que `sameJointSpec` pero
   ignora hertz/dampingRatio/length y exige paridad de spring-enabled (`(a.hertz>0)==(b.hertz>0)`). Cuando la
   lista nueva difiere de la actual SOLO en esos params de resorte (misma estructura, mismos ids vivos, tipos
   distance/spherical/revolute), `setJointNodeList` llama `applyLiveSpringParams` (`b3DistanceJoint_SetSpringHertz/
@@ -245,42 +236,11 @@ Update 2026-07:
   cualquier cliente que actualice muchos resortes por frame). Cruzar el umbral hertz 0↔>0 sí recrea (cambia
   enableSpring). Weld cae a recreate.
 
-Update 2026-07 (Mixamo ragdoll texturado + skinning en POP/GPU):
-
-- **Box3D Mixamo Ragdoll SOP** (`Box3dmixamoragdoll`, `Box3DMixamoRagdollSOP/`): ragdoll de la
-  tabla de esqueleto **horneada de `samples/Ch36_nonPBR.fbx`** (rig Mixamo de 175 cm, prefijo
-  `mixamorig1:`) — 13 cápsulas + 12 joints anatómicos, más un **retarget rígido de los 65 huesos
-  Mixamo** (posición Y rotación de bind pose horneadas; brazos/piernas/manos NO son identidad).
-  Info DAT `name tx ty tz rx ry rz` con nombres `mixamorig1:*` (param `Bone Prefix`) para manejar
-  un esqueleto importado. **Además tiene un INPUT opcional de mesh**: auto-skinea cada vértice al
-  cuerpo más cercano y saca el mesh deformado (auto-fit de escala; sale en espacio físico,
-  alineado con la colisión — mover con `Position`). `Count`/`Spacing` para N instancias en grilla.
-- **LÍMITE del SOP con texturas**: el mesh Mixamo capturado (`pCaptPath[65]`, `pCaptData`, punto
-  `pCapt`) trae `uv`/`N` como atributos de **vértice en un Vertex Buffer Object** que la API C++
-  de SOP (`getTextures`/`getNormals`) **NO expone** → el deform en SOP pierde la textura. No hay
-  Convert/Facet que lo destrabe. Por eso el camino texturado es por **POP** (leen atributos de
-  vértice en GPU).
-- **Box3D Skin GPU POP** (`Box3dskin`, `Box3DSkinPOP/`): es el ragdoll Mixamo pero como POP que
-  **deforma el mesh preservando las UVs**. Param `Solver`, input 0 = mesh, input 1 (opc) = spawn
-  points (una instancia por punto; si no, `Count`/`Spacing`). Reusa la física del header
-  compartido **`common/Box3DMixamoRig.h`** (`build`/`bindSkin`/`deform`). Forwardea `uv` (busca
-  `uv`/`Tex`/`map1`, punto o vértice) + `N` + topología COMPLETA (triángulos **y** quads; copiar
-  todo el `POP_TopologyInfo` + índice, si no los quads quedan como huecos). Instancing: n·N puntos,
-  atributos de vértice replicados en el **mismo orden reordenado** que el index buffer (si no, se
-  rompen las texturas). Deform en **CPU** (~40 instancias @ 1 substep). Gotcha: en POP usar
-  `getParDouble(name)` que devuelve valor, NO la sobrecarga `(name,&v)` (no puebla).
-- **Box3D Skin CUDA POP** (`Box3dskincuda`, `Box3DSkinCudaPOP/`): idéntico pero el deform LBS corre
-  en un **kernel CUDA** (`SkinCuda.cu`), escala a muchísimas más instancias. El POP CPU queda como
-  fallback sin CUDA. **Se compila con `build_skincuda.bat` (nvcc directo, como el ClothPOP)** — NO
-  por CMake (falta la integración CUDA de VS y Program Files pide admin); enlaza
-  `build\Release\Box3DCore.lib`, así que correr `cmake --build build --config Release` primero.
-- Normales durante el movimiento: los POPs forwardean las originales; recalcular con un **Normal
-  POP aguas abajo** (más correcto que rotarlas). Ver la memoria del proyecto para el detalle de
-  todo el camino y decisiones.
+Update 2026-07 (POPs):
 
 - **Box3D Instances POP** (`Box3dinstancespop`, `Box3DInstancesPOP/`): la versión **POP** del
   Instances CHOP para live performance (todo GPU/POP, sin round-trip de canales; comparte Solver =
-  mismo mundo box3d ⇒ colisiona gratis con los ragdolls Mixamo / Skin POP). Input 0 = spawn points
+  mismo mundo box3d ⇒ colisiona gratis con cualquier otro grupo del mundo). Input 0 = spawn points
   (un cuerpo rígido por punto, count variable en vivo); salida = nube de N puntos con atributos de
   punto `P` (pos), **`rot` (float3 = rx ry rz Euler XYZ grados, formato TouchDesigner — NO
   quaternion)**, `scale` (float3, saneada y espejada según shape como el CHOP: esfera uniforme,
@@ -289,12 +249,12 @@ Update 2026-07 (Mixamo ragdoll texturado + skinning en POP/GPU):
   capsule), `density`, `friction`, `restitution`, `type` (0/1/2), `alive` (0 static/1 dynamic —
   pisa a `type`), `bullet` (CCD), `orient` (float4 quat) o `rot` (float3 Euler XYZ deg). Params:
   Solver (default `Box3dsolver1`), Reset, Default Shape/Size/Density/Friction/Restitution/Type,
-  CCD. Mismo patrón cliente que el Skin POP: `cookEveryFrame` + `cookOnStart` + heartbeat
+  CCD. Mismo patrón cliente que los demás nodos: `cookEveryFrame` + `cookOnStart` + heartbeat
   (`setGroupPath` cada cook ⇒ bypassear lo saca del mundo en ~4 advances). Detección de cambio de
   grupo por `defaults != last || input.opId != last || input.totalCooks != last` (reusa el parcheo
   por índice de `setGroup`: agregar/sacar puntos al final NO resetea lo que ya simula, identidad =
-  índice de punto). Sin CUDA (solo saca transforms, no deform por vértice) ⇒ compila por **CMake**
-  ungated como el Skin POP, NO por `build_skincuda.bat`. Conversiones euler↔quat locales en el cpp
+  índice de punto). Sin CUDA (solo saca transforms, no deform por vértice) ⇒ compila por **CMake**.
+  Conversiones euler↔quat locales en el cpp
   (mismo álgebra/rotate-order que `tdb3::quatToEulerXYZDegrees` — el POP no puede incluir
   `TDB3Common.h` porque arrastra el header CHOP, que no está en `sdk_pop`). Shapes hull/mesh/compound
   (3/4/5) no soportados acá (necesitan hullPoints por punto, que una nube POP no trae).

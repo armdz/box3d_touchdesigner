@@ -22,11 +22,9 @@ Usar este bloque como fuente de verdad rápida:
 - **Fuerzas / atractor (Box3D Force CHOP)**: `ForceField` en el core (attractor/repulsor/wind/vortex, strength/radius/falloff/mass-indep/target group) aplicado a bodies dinámicos antes de cada step; registrado por nodo con heartbeat como joints. **Box3D Force CHOP** (`Box3dforce`): posición por param o un Points SOP (multi-atractor), target all o un grupo por path.
 - **Box contenedor (colisión hacia adentro)**: shape 6 del core (`hollow box`) — 6 (o 5) slabs finas con `b3MakeOffsetBoxHull` como shapes múltiples de un body, la cavidad colisiona hacia adentro; expuesto en el Body SOP como `Box (Container, Inward)` con `Wall Thickness` + `Open Top`. Static/kinematic/dynamic.
 - **Material presets (Instances)**: `Custom`, `Soft`, `Medium`, `Bouncy` para fallback rápido de material.
-- **Ragdoll**: `JointSpec.pivotMode` cableado (0 pivot-a-pivot, 1 pivote de A, 2 pivote de B —
-  convención ragdoll: el hueso hijo lleva el ancla —, 3 ancla mundial explícita), expuesto como menú
-  `Pivot` + `Anchor` en el Joint CHOP; **Box3D Ragdoll SOP** (`Box3dragdoll`): humanoide completo en un
-  nodo — 11 cápsulas + 10 joints con límites anatómicos, salida geometría simulada o puntos con
-  `orient`/`scale`/`bone` para instancing.
+- **pivotMode de joints**: `JointSpec.pivotMode` cableado (0 pivot-a-pivot, 1 pivote de A, 2 pivote de B —
+  el hueso hijo lleva el ancla —, 3 ancla mundial explícita), expuesto como menú
+  `Pivot` + `Anchor` en el Joint CHOP.
 - **Eventos de contacto**: el core captura begin/end/hit de `b3World_GetContactEvents` por advance;
   **Box3D Contacts CHOP** los emite (un sample por evento, con punto/normal/velocidad e Info DAT con paths),
   Instances CHOP tiene toggle `Contact Channels` (`touching impulse hitspeed` por instancia), el Info CHOP del
@@ -279,7 +277,6 @@ box3d-touchdesigner/
   Box3DSetJointSOP/        ← pivote de joint como atributos en la cadena SOP
   Box3DDebugSOP/           ← debug draw del mundo de colisión
   Box3DContactsCHOP/       ← eventos de colisión (begin/end/hit)
-  Box3DRagdollSOP/         ← ragdoll humanoide de un nodo (11 huesos + 10 joints)
   TD-Examples/             ← escenas .toe de ejemplo
   tox/                     ← COMP wrappers (WIP)
   build/                   ← build dir de CMake (no trackear)

@@ -3,7 +3,7 @@
 // spawn points (one rigid body per point, count variable live), and the output
 // is an N-point cloud carrying each body's live pose for instancing geometry on
 // the GPU with no channel round-trip. Shares the Solver (same box3d world) with
-// the Skin CUDA POP / Mixamo ragdolls, so they collide for free.
+// every other body group, so they collide for free.
 //
 // Output attributes (Point class): P (float3 position), rot (float3 rotation as
 // TouchDesigner Euler XYZ degrees), scale (float3), v (float3 linear velocity).
